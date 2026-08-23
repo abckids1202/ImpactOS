@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ImpactOS — Low-Fidelity Wireframes</title>
+  <style>
+    :root { --ink:#1d2733; --muted:#66727f; --line:#cbd3da; --paper:#fff; --wash:#f4f6f7; --accent:#2e5966; --warn:#8b5e12; --danger:#8a3c3c; --ok:#376b4e; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:#e9edef; color:var(--ink); font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; }
+    a { color:inherit; }
+    .top { background:#17232e; color:#fff; padding:18px 24px; }
+    .top h1 { margin:0; font-size:20px; letter-spacing:.02em; }
+    .top p { margin:4px 0 0; color:#c9d3d9; }
+    .nav { display:flex; gap:8px; flex-wrap:wrap; padding:12px 24px; background:#fff; border-bottom:1px solid var(--line); position:sticky; top:0; z-index:2; }
+    .nav a { text-decoration:none; border:1px solid var(--line); background:var(--wash); padding:7px 10px; border-radius:5px; font-size:12px; }
+    .nav a:hover, .nav a:focus { background:#e0e9eb; outline:2px solid #83aab2; outline-offset:1px; }
+    main { max-width:1180px; margin:24px auto 60px; padding:0 18px; }
+    .screen { scroll-margin-top:86px; background:var(--paper); border:1px solid #b7c1c8; box-shadow:0 4px 18px #1d273318; margin:0 0 30px; }
+    .screen h2 { margin:0; padding:14px 18px; border-bottom:1px solid var(--line); font-size:17px; }
+    .app { display:grid; grid-template-columns:170px 1fr; min-height:410px; }
+    .side { background:#f7f8f8; border-right:1px solid var(--line); padding:16px 12px; }
+    .brand { font-weight:700; font-size:13px; margin-bottom:18px; color:var(--accent); }
+    .side a, .side span { display:block; padding:6px 8px; margin:2px 0; text-decoration:none; border-radius:4px; color:#4b5864; }
+    .side .active { background:#dce8ea; color:#183a43; font-weight:600; }
+    .content { padding:18px; }
+    .bar { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; border-bottom:1px solid var(--line); padding-bottom:12px; margin-bottom:16px; }
+    .bar h3 { margin:0; font-size:18px; }
+    .sub { color:var(--muted); font-size:12px; margin-top:3px; }
+    .badge { display:inline-block; border:1px solid #9daab2; background:#f6f8f8; border-radius:12px; padding:3px 8px; font-size:11px; white-space:nowrap; }
+    .grid2 { display:grid; grid-template-columns:1.1fr .9fr; gap:16px; }
+    .card { border:1px solid var(--line); border-radius:5px; padding:13px; margin-bottom:12px; background:#fff; }
+    .card h4 { margin:0 0 8px; font-size:13px; }
+    .label { display:block; color:#4d5a65; font-size:11px; font-weight:650; margin:10px 0 4px; }
+    input, textarea, select { width:100%; font:inherit; border:1px solid #9eabb4; border-radius:3px; padding:8px; background:#fff; color:var(--ink); }
+    textarea { min-height:66px; resize:vertical; }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    .actions { display:flex; justify-content:flex-end; gap:8px; margin-top:13px; flex-wrap:wrap; }
+    button { border:1px solid #64747d; background:#fff; border-radius:4px; padding:7px 10px; font:inherit; cursor:pointer; }
+    button.primary { background:#274e59; color:#fff; border-color:#274e59; }
+    button.warn { color:#70490a; border-color:#ba9349; background:#fff9ed; }
+    button.danger { color:#7c2f2f; border-color:#bd8383; background:#fff7f7; }
+    .notice { padding:10px 12px; border-left:4px solid #8ea8b0; background:#f1f6f7; margin:10px 0; }
+    .notice.warn { border-color:#bd9347; background:#fff8ea; }
+    .notice.danger { border-color:#ae6868; background:#fff3f3; }
+    .notice.ok { border-color:#78a489; background:#f0f8f2; }
+    .stepper { display:flex; gap:6px; margin-bottom:16px; flex-wrap:wrap; }
+    .step { border:1px solid var(--line); padding:5px 8px; color:var(--muted); border-radius:3px; font-size:11px; }
+    .step.current { border-color:#5f8b94; background:#e7f0f1; color:#193e47; font-weight:700; }
+    .check { color:var(--ok); font-weight:700; }
+    .empty { color:var(--muted); font-style:italic; }
+    .queue-item { display:grid; grid-template-columns:1fr auto; gap:12px; border:1px solid var(--line); padding:11px; margin:8px 0; border-radius:4px; }
+    .queue-item strong { display:block; font-size:13px; }
+    .queue-item small { color:var(--muted); }
+    .pill-high { color:#7d3030; background:#fff1f1; border-color:#cf9696; }
+    .pill-med { color:#78530f; background:#fff8e9; border-color:#d0ac63; }
+    .pill-low { color:#346446; background:#f0f8f2; border-color:#9bc2a8; }
+    .mini { color:var(--muted); font-size:12px; }
+    .footer-note { max-width:1180px; margin:0 auto 50px; padding:0 18px; color:#53616a; font-size:12px; }
+    @media (max-width:760px) { .app { grid-template-columns:1fr; } .side { border-right:0; border-bottom:1px solid var(--line); display:flex; overflow:auto; gap:4px; padding:8px; } .side .brand { display:none; } .side a, .side span { white-space:nowrap; } .grid2, .row { grid-template-columns:1fr; } .bar { display:block; } .bar .badge { margin-top:8px; } }
+  </style>
+</head>
+<body>
+  <header class="top">
+    <h1>Pilar Impact Lab / ImpactOS</h1>
+    <p>Low-fidelity workflow prototype · synthetic data · validate language and decisions before build</p>
+  </header>
+  <nav class="nav" aria-label="Wireframe screens">
+    <a href="#problem">WF-01 Student problem</a>
+    <a href="#research">WF-02 Research workspace</a>
+    <a href="#impact">WF-03 Impact workspace</a>
+    <a href="#mentor">WF-04 Mentor queue</a>
+    <a href="#moderation">WF-05 Moderation queue</a>
+  </nav>
+  <main>
+    <section class="screen" id="problem">
+      <h2>WF-01 · Student problem flow</h2>
+      <div class="app">
+        <aside class="side"><div class="brand">PILAR IMPACT LAB</div><span class="active">New problem</span><a href="#research">My problems</a><a href="#impact">My projects</a><a href="#mentor">Help</a></aside>
+        <div class="content">
+          <div class="bar"><div><h3>Tell us what is happening</h3><div class="sub">Describe a real need, not only a solution idea.</div></div><span class="badge">Student contributor</span></div>
+          <div class="stepper"><span class="step current">1 · Describe</span><span class="step">2 · Check</span><span class="step">3 · Submit</span></div>
+          <div class="grid2">
+            <div class="card">
+              <label class="label" for="title">Title</label><input id="title" value="Major assignments are due in the same three-day period">
+              <label class="label" for="description">What is happening?</label><textarea id="description">Several Grade 10 classes have major assignments due within the same three-day period. This appears to happen repeatedly.</textarea>
+              <div class="row"><div><label class="label" for="affected">Who is affected?</label><select id="affected"><option>Grade 10 students</option></select></div><div><label class="label" for="scope">Scope</label><select id="scope"><option>Several classes</option></select></div></div>
+              <label class="label" for="category">Category</label><select id="category"><option>Learning &amp; workload</option></select>
+            </div>
+            <div>
+              <div class="card"><h4>Visibility</h4><label><input type="radio" name="visibility" checked> School-visible under my name</label><br><label><input type="radio" name="visibility"> School-visible anonymously</label><br><label><input type="radio" name="visibility"> Private review only</label><div class="mini" style="margin-top:8px">You can change this before submitting. Sensitive reports go to restricted review.</div></div>
+              <div class="card"><h4>AI framing suggestion <span class="badge">Suggestion</span></h4><div class="mini">Could this be about the timing of major assignments?</div><div class="actions"><button>Dismiss</button><button>Edit</button><button class="primary">Use as draft</button></div></div>
+            </div>
+          </div>
+          <div class="actions"><button>Save draft</button><button class="primary">Continue to review</button></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="screen" id="research">
+      <h2>WF-02 · Research workspace</h2>
+      <div class="app">
+        <aside class="side"><div class="brand">PILAR IMPACT LAB</div><a href="#problem">Problems</a><span class="active">Research</span><a href="#impact">Impact projects</a><a href="#mentor">My tasks</a></aside>
+        <div class="content">
+          <div class="bar"><div><h3>Research: Assessment deadline concentration</h3><div class="sub">Problem link: Assessment Workload Concentration · Mentor: Ms. Rani</div></div><span class="badge">DRAFT</span></div>
+          <div class="grid2">
+            <div>
+              <div class="card"><h4>Research question</h4><textarea>How concentrated are major assignment deadlines across Grade 10 classes during a typical month?</textarea><div class="actions"><button>Suggest a question</button><span class="badge">descriptive</span></div></div>
+              <div class="card"><h4>Plan checklist</h4><div><span class="check">✓</span> Population</div><div><span class="check">✓</span> Variables</div><div>□ Sampling</div><div>□ Ethics</div><div>□ Limitations</div></div>
+            </div>
+            <div>
+              <div class="card"><h4>Methodology warnings <span class="badge pill-med">2</span></h4><div class="notice warn"><strong>Convenience sample</strong><br><span class="mini">May not represent all Grade 10 students. State the sample boundary.</span></div><div class="notice warn"><strong>Two outcomes detected</strong><br><span class="mini">Split “stress and grades” into separate questions.</span></div></div>
+              <div class="card"><h4>Linked context</h4><div class="mini">Problem cluster · 18 affected signals · 4 evidence items</div><div class="mini" style="margin-top:8px">Survey approval is required before collection.</div></div>
+            </div>
+          </div>
+          <div class="actions"><button>Save draft</button><button class="primary">Submit for mentor review</button></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="screen" id="impact">
+      <h2>WF-03 · Impact workspace</h2>
+      <div class="app">
+        <aside class="side"><div class="brand">PILAR IMPACT LAB</div><a href="#problem">Problems</a><a href="#research">Research</a><span class="active">Impact projects</span><a href="#mentor">My tasks</a></aside>
+        <div class="content">
+          <div class="bar"><div><h3>Impact: Shared assessment calendar</h3><div class="sub">Linked problem → research → evidence trail</div></div><span class="badge">REVIEW</span></div>
+          <div class="card"><h4>Theory of change</h4><div class="mini">If teachers coordinate major deadlines in one shared view, then deadline concentration may decrease for Grade 10 classes, because conflicts are visible.</div></div>
+          <div class="grid2">
+            <div class="card"><h4>Primary metric <span class="badge">Required</span></h4><input value="Number of major deadlines per three-day window"><label class="label">Unit</label><select><option>Count</option></select><h4 style="margin-top:16px">Baseline <span class="badge pill-high">Missing</span></h4><div class="notice warn">This project cannot become ACTIVE until a baseline plan is saved.</div><button class="primary">Add baseline observation</button></div>
+            <div class="card"><h4>Progress</h4><div class="queue-item"><div><strong>Define calendar</strong><small>Complete</small></div><span class="badge pill-low">Done</span></div><div class="queue-item"><div><strong>Teacher test</strong><small>Owner: Aisha</small></div><span class="badge pill-med">In progress</span></div><div class="queue-item"><div><strong>Post measurement</strong><small>Blocked until action</small></div><span class="badge">Next</span></div></div>
+          </div>
+          <div class="card"><h4>Observed results</h4><div class="row"><div><span class="label">Baseline</span>8 windows / 14 deadlines</div><div><span class="label">Post</span><span class="empty">Not recorded</span></div></div><div class="notice">Result language will use “observed change” unless the design supports a stronger claim.</div><div class="actions"><button>Edit impact report</button><button class="primary">Submit for impact review</button></div></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="screen" id="mentor">
+      <h2>WF-04 · Mentor review queue</h2>
+      <div class="app">
+        <aside class="side"><div class="brand">PILAR IMPACT LAB</div><a href="#problem">Overview</a><a href="#research">Research</a><a href="#impact">Impact projects</a><span class="active">Review queue</span></aside>
+        <div class="content">
+          <div class="bar"><div><h3>Mentor review queue</h3><div class="sub">Review exceptions first; open an item for context and decision history.</div></div><span class="badge">4 need attention</span></div>
+          <div class="card"><div class="actions" style="justify-content:flex-start;margin:0 0 8px"><button class="primary">All</button><button>Due soon</button><button>Stale</button><button>Privacy</button></div>
+            <div class="queue-item"><div><strong>Survey: deadline pattern</strong><small>Owner: Grade 10 team · Last activity: today</small></div><span class="badge pill-high">Privacy warning</span></div>
+            <div class="queue-item"><div><strong>Impact: shared calendar</strong><small>Owner: Aisha · Due: tomorrow</small></div><span class="badge pill-high">Baseline missing</span></div>
+            <div class="queue-item"><div><strong>Research: canteen queue</strong><small>Owner: OSIS team · Changes requested 2 days ago</small></div><span class="badge pill-med">Needs response</span></div>
+            <div class="queue-item"><div><strong>Impact: quiet study space</strong><small>Owner: Daniel · Stale for 7 days</small></div><span class="badge pill-low">Stale</span></div>
+          </div>
+          <div class="card"><h4>Review history</h4><div class="mini">23 Aug · Approved research plan — Assessment deadline concentration</div><div class="mini">22 Aug · Requested changes — Canteen queue survey</div></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="screen" id="moderation">
+      <h2>WF-05 · Moderation queue</h2>
+      <div class="app">
+        <aside class="side"><div class="brand">PILAR IMPACT LAB</div><a href="#problem">Overview</a><span class="active">Private review</span><a href="#research">Duplicates</a><a href="#mentor">Audit log</a></aside>
+        <div class="content">
+          <div class="bar"><div><h3>Moderation queue</h3><div class="sub">AI flags content; a designated person decides and records the reason.</div></div><span class="badge pill-high">Restricted</span></div>
+          <div class="grid2">
+            <div class="card"><h4>Private review <span class="badge pill-high">2</span></h4><div class="notice danger"><strong>Personal accusation / possible safeguarding issue</strong><br><span class="mini">Report: “…” · Submitted: 23 Aug · Visibility: PRIVATE_REVIEW</span></div><div class="notice">Urgent-help route: <strong>school-configured contact / notice</strong></div><div class="actions" style="justify-content:flex-start"><button class="danger">Open restricted record</button><button class="warn">Route to safeguarding</button></div></div>
+            <div class="card"><h4>Duplicate suggestion</h4><div class="mini">New report: Assignment deadlines overlap</div><div class="notice"><strong>Candidate cluster:</strong> Assessment Workload Concentration<br><span class="mini">Suggestion only · similar timing, grade, and category</span></div><div class="actions" style="justify-content:flex-start"><button>Open both records</button><button class="primary">Merge into cluster</button><button>Not a match</button></div></div>
+          </div>
+          <div class="card"><h4>Decision reason <span class="badge">Required</span></h4><textarea placeholder="Explain the routing or merge decision..."></textarea><div class="actions"><button>Cancel</button><button class="primary">Save decision + audit event</button></div></div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <div class="footer-note">Synthetic wireframe content only. Configure the school's safeguarding route, retention policy, roles, and publication permissions before using real data.</div>
+</body>
+</html>
