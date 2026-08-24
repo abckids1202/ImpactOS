@@ -16,7 +16,7 @@ This repository now contains the closed-alpha implementation baseline and the pl
 
 ## Run locally
 
-Prerequisites: Python 3.10+, Node.js 18+, and npm. Docker is optional; SQLite is the default local database.
+Prerequisites: Python 3.9+, Node.js 18+, and npm. Docker is optional; SQLite is the default local database.
 
 ### Terminal 1 — backend
 
