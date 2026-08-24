@@ -1,0 +1,58 @@
+const API = import.meta.env.VITE_API_URL || "/api/v1";
+
+function csrfToken(): string {
+  return document.cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith("impactos_csrf="))?.split("=")[1] || "";
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const method = (init.method || "GET").toUpperCase();
+  const headers = new Headers(init.headers || {});
+  headers.set("Accept", "application/json");
+  if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  if (!["GET", "HEAD", "OPTIONS"].includes(method)) headers.set("X-CSRF-Token", csrfToken());
+  const response = await fetch(`${API}${path}`, { ...init, headers, credentials: "include" });
+  const text = await response.text();
+  const body = text ? JSON.parse(text) : null;
+  if (!response.ok) {
+    const detail = body?.detail;
+    const message = typeof detail === "string" ? detail : detail?.message || "The request could not be completed.";
+    throw new Error(message);
+  }
+  return body as T;
+}
+
+export const api = {
+  login: (email: string, password: string) => request<{ user: import("./types").User; mode: string; synthetic_data: boolean }>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
+  logout: () => request<{ status: string }>("/auth/logout", { method: "POST" }),
+  me: () => request<import("./types").User>("/me"),
+  dashboard: () => request<any>("/dashboard"),
+  clusters: () => request<import("./types").Cluster[]>("/problem-clusters"),
+  cluster: (id: string) => request<import("./types").Cluster>(`/problem-clusters/${id}`),
+  createReport: (payload: Record<string, unknown>) => request<any>("/problem-reports", { method: "POST", body: JSON.stringify(payload) }),
+  submitReport: (id: string) => request<any>(`/problem-reports/${id}/submit`, { method: "POST" }),
+  addSignal: (id: string, signal_type: string) => request<import("./types").Cluster>(`/problem-clusters/${id}/signals`, { method: "POST", body: JSON.stringify({ signal_type }) }),
+  addEvidence: (id: string, payload: Record<string, unknown>) => request<import("./types").Cluster>(`/problem-clusters/${id}/evidence`, { method: "POST", body: JSON.stringify(payload) }),
+  createResearch: (cluster_id: string, title: string) => request<import("./types").Research>("/research-projects", { method: "POST", body: JSON.stringify({ cluster_id, title }) }),
+  research: (id: string) => request<import("./types").Research>(`/research-projects/${id}`),
+  researchList: () => request<import("./types").Research[]>("/research-projects"),
+  savePlan: (id: string, plan: Record<string, unknown>) => request<import("./types").Research>(`/research-projects/${id}/plan`, { method: "PUT", body: JSON.stringify(plan) }),
+  submitResearch: (id: string) => request<import("./types").Research>(`/research-projects/${id}/submit-review`, { method: "POST" }),
+  review: (payload: Record<string, unknown>) => request<any>("/reviews", { method: "POST", body: JSON.stringify(payload) }),
+  impacts: () => request<import("./types").ImpactProject[]>("/impact-projects"),
+  impact: (id: string) => request<import("./types").ImpactProject>(`/impact-projects/${id}`),
+  createImpact: (payload: Record<string, unknown>) => request<import("./types").ImpactProject>("/impact-projects", { method: "POST", body: JSON.stringify(payload) }),
+  updateImpact: (id: string, payload: Record<string, unknown>) => request<import("./types").ImpactProject>(`/impact-projects/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  submitImpact: (id: string) => request<import("./types").ImpactProject>(`/impact-projects/${id}/submit-review`, { method: "POST" }),
+  addMetric: (id: string, payload: Record<string, unknown>) => request<import("./types").ImpactProject>(`/impact-projects/${id}/metrics`, { method: "POST", body: JSON.stringify(payload) }),
+  addObservation: (metricId: string, payload: Record<string, unknown>) => request<import("./types").ImpactProject>(`/impact-metrics/${metricId}/observations`, { method: "POST", body: JSON.stringify(payload) }),
+  activate: (id: string) => request<import("./types").ImpactProject>(`/impact-projects/${id}/activate`, { method: "POST" }),
+  impactReport: (id: string) => request<any>(`/impact-projects/${id}/report`),
+  saveReport: (id: string, content: Record<string, unknown>) => request<any>(`/impact-projects/${id}/report`, { method: "PUT", body: JSON.stringify({ content }) }),
+  submitReportForReview: (id: string) => request<any>(`/impact-projects/${id}/submit-report`, { method: "POST" }),
+  moderation: () => request<any>("/moderation/queue"),
+  moderationDecision: (id: string, decision: string, reason: string) => request<any>(`/moderation/problem-reports/${id}/visibility-decision`, { method: "POST", body: JSON.stringify({ decision, reason }) }),
+  mentorAttention: () => request<any>("/mentor/attention"),
+  osis: () => request<any>("/osis/overview"),
+  adminLogs: () => request<any[]>("/admin/audit-logs"),
+  notifications: () => request<any[]>("/notifications"),
+};

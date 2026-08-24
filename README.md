@@ -1,34 +1,90 @@
-# ImpactOS — Pilar Impact Lab
+# ImpactOS — Pilar Impact Lab Closed Alpha
 
-ImpactOS is a school pilot platform for moving from a real problem to evidence, a student-led intervention, and an honest account of what changed.
+ImpactOS is a school workflow application that helps students move from a real problem to evidence, a practical intervention, and an honest account of what changed.
 
-This repository currently contains the planning baseline and the next discovery artifacts. It is intentionally pre-development: the first goal is to validate the workflow with Pilar students, mentors, OSIS, and administrators before building the full vertical slice.
+This repository now contains the closed-alpha implementation baseline and the planning package. It runs with synthetic demonstration data and is not approved for live student data until the school-policy blockers are resolved.
 
-## Repository contents
+## Current implementation
 
-- [`docs/ImpactOS-V1-PRD-and-System-Specification.md`](docs/ImpactOS-V1-PRD-and-System-Specification.md) — canonical V1 product requirements and system specification.
-- [`docs/discovery/01-school-discovery-interview-pack.md`](docs/discovery/01-school-discovery-interview-pack.md) — interview guides, participant plan, consent language, synthesis method, and decision log.
-- [`docs/discovery/02-current-to-future-workflow-map.md`](docs/discovery/02-current-to-future-workflow-map.md) — a hypothesis map of the current school process and the proposed ImpactOS flow.
-- [`docs/discovery/03-clickable-prototype-test-script.md`](docs/discovery/03-clickable-prototype-test-script.md) — five usability tasks and moderator prompts for prototype testing.
-- [`docs/wireframes/low-fidelity-wireframes.md`](docs/wireframes/low-fidelity-wireframes.md) — annotated screen-by-screen wireframe specification.
-- [`docs/wireframes/impactos-wireframes.html`](docs/wireframes/impactos-wireframes.html) — self-contained, browsable low-fidelity wireframe prototype.
+- FastAPI + SQLAlchemy backend in `backend/`.
+- SQLite zero-setup development database; PostgreSQL is supported through `DATABASE_URL`.
+- Invite-only-style demo accounts with signed HTTP-only sessions and CSRF protection.
+- React + TypeScript + Vite frontend in `frontend/`.
+- Real API-backed workflows for dashboard, problem reports, private moderation, clusters, signals, evidence, research plans, mentor review, surveys, analysis/export, impact projects, metrics, baseline activation, observations, impact reports, OSIS overview, notifications, and audit logs.
+- Synthetic seed data with the golden path: Assessment Workload Concentration → Deadline research → Shared Assessment Calendar → observed change.
+- Planning and discovery artifacts in `docs/`.
 
-## Viewing the wireframes
+## Run locally
 
-Open `docs/wireframes/impactos-wireframes.html` in a browser. The screen links at the top jump between the five pilot-critical views:
+Prerequisites: Python 3.10+, Node.js 18+, and npm. Docker is optional; SQLite is the default local database.
 
-1. Student problem flow
-2. Research workspace
-3. Impact workspace
-4. Mentor review queue
-5. Moderation queue
+### Terminal 1 — backend
 
-The wireframes are deliberately grayscale and content-first. They are for validating terminology, information order, permissions, and workflow friction—not for approving visual branding.
+From `C:\Users\charl\OneDrive\Desktop\ImpactOS`:
 
-## Immediate next step
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r backend\requirements.txt
+python scripts\migrate.py
+python scripts\seed_demo.py
+python -m uvicorn app.main:app --app-dir backend --reload --port 8000
+```
 
-Run the discovery interviews and five-task prototype test, capture the school's policy decisions, then revise the PRD and wireframes before Milestone 1 engineering begins.
+If PowerShell blocks activation, run the Python commands without activation using `.venv\Scripts\python.exe`.
 
-## Pilot boundary
+Backend URLs:
 
-The V1 pilot is one school, a limited cohort, a small set of non-sensitive categories, manual moderation, a constrained survey builder, and one complete problem → research → intervention → impact loop. The PRD remains the source of truth for scope, permissions, safety, and acceptance criteria.
+- API health: <http://127.0.0.1:8000/api/v1/health>
+- OpenAPI docs: <http://127.0.0.1:8000/docs>
+
+### Terminal 2 — frontend
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Open <http://localhost:5173>.
+
+## Demo accounts
+
+All demo accounts use password `demo1234`:
+
+| Role | Email |
+|---|---|
+| Student contributor | `student@demo.local` |
+| Student project leader | `leader@demo.local` |
+| Mentor | `mentor@demo.local` |
+| OSIS reviewer | `osis@demo.local` |
+| Moderator | `moderator@demo.local` |
+| Administrator | `admin@demo.local` |
+
+The app displays a persistent `DEMO DATA` label. Demo-role switching is intentionally limited to the login screen and synthetic data.
+
+## Verification commands
+
+```powershell
+python -m pytest backend\tests -q
+cd frontend
+npm run lint
+npm run build
+```
+
+The first backend start creates `impactos.db` in the current working directory. To rebuild synthetic data locally, stop the backend and remove only that file, then rerun `scripts\migrate.py` and `scripts\seed_demo.py`.
+
+## Key documents
+
+- `docs/ImpactOS-Definitive-Build-Plan-and-Master-Prompt.md` — definitive implementation plan.
+- `docs/ImpactOS-V1-PRD-and-System-Specification.md` — product and system baseline.
+- `docs/DECISIONS.md` — implementation decisions and assumptions.
+- `docs/LIVE_DEPLOYMENT_BLOCKERS.md` — policy decisions required before live school use.
+- `docs/discovery/` — interview and prototype-test materials.
+- `docs/wireframes/` — low-fidelity specifications and the earlier browsable prototype.
+
+## Architecture notes
+
+Routes validate input and delegate state changes through explicit transition maps. Every high-value mutation records an audit event. Restricted reports are filtered server-side, and anonymous survey responses deliberately do not store a researcher-visible identity. AI behavior is currently represented by deterministic, explainable demo suggestions; the manual workflow never depends on an AI provider.
+
+This is a closed-alpha baseline, not a production deployment. The next safe action is to run the seeded golden path, execute the automated checks, and then use the discovery pack to confirm Pilar's safeguarding, authority, authentication, retention, and language decisions.
