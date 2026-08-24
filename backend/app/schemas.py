@@ -143,3 +143,27 @@ class ObservationCreate(BaseModel):
 
 class ReportUpdate(BaseModel):
     content: dict[str, Any]
+
+
+class InvitationCreate(BaseModel):
+    email: str
+    role: Literal["STUDENT", "STUDENT_LEADER", "MENTOR", "OSIS"] = "STUDENT"
+    expires_in_days: int = Field(default=7, ge=1, le=30)
+
+
+class InvitationAccept(BaseModel):
+    display_name: str = Field(min_length=2, max_length=160)
+    password: str = Field(min_length=10, max_length=128)
+
+
+class ActivationEmailRequest(BaseModel):
+    email: str
+
+
+class PasswordForgotRequest(BaseModel):
+    email: str
+
+
+class PasswordResetRequest(BaseModel):
+    token: str
+    password: str = Field(min_length=10, max_length=128)

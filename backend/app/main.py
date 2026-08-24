@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import os
 import re
-from datetime import datetime
+import secrets
+from datetime import datetime, timedelta
 from statistics import mean, median
 from typing import Any
 from uuid import uuid4
@@ -29,7 +31,10 @@ from .models import (
     ProblemCluster,
     ProblemReport,
     ProblemSignal,
+    PublicImpactStory,
     ProjectTask,
+    Invitation,
+    PasswordResetToken,
     ResearchPlanVersion,
     ResearchProject,
     Review,
@@ -46,6 +51,8 @@ from .schemas import (
     EvidenceCreate,
     ImpactCreate,
     ImpactUpdate,
+    InvitationAccept,
+    InvitationCreate,
     LoginRequest,
     MergeRequest,
     MetricCreate,
@@ -57,6 +64,9 @@ from .schemas import (
     ResearchPlanUpdate,
     ReportUpdate,
     SignalCreate,
+    ActivationEmailRequest,
+    PasswordForgotRequest,
+    PasswordResetRequest,
     SurveyCreate,
     SurveyQuestionCreate,
     SurveyResponseCreate,
@@ -85,6 +95,53 @@ app.add_middleware(
 
 API = "/api/v1"
 DEMO_PASSWORD = os.getenv("DEMO_PASSWORD", "demo1234")
+
+
+def app_mode() -> str:
+    return os.getenv("APP_MODE", "DEMO").upper()
+
+
+def demo_access_allowed() -> bool:
+    return app_mode() == "DEMO" and os.getenv("ENVIRONMENT", "development").lower() not in {"production", "prod"}
+
+
+def token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+PUBLIC_FAQ = [
+    {"category": "About the platform", "question": "What is Pilar Impact Lab?", "answer": "Pilar Impact Lab is SPI's structured path for turning student observations into evidence-backed projects and measured learning. It is powered by ImpactOS."},
+    {"category": "Membership", "question": "Who can use the internal platform?", "answer": "Approved SPI members and invited project participants. Privileged roles are assigned by authorized staff; there is no unrestricted public registration."},
+    {"category": "Privacy", "question": "Can anyone see student problem reports?", "answer": "No. Public pages contain only approved, sanitized impact stories. Internal reports, identities, survey responses, evidence, and moderation records remain restricted."},
+    {"category": "AI", "question": "Does AI make school decisions?", "answer": "No. AI may suggest clarification or methodology help. People decide visibility, approvals, moderation, publication, and school policy."},
+    {"category": "Privacy", "question": "What happens when a report is sensitive?", "answer": "It is routed to restricted review and does not appear in the public problem space. ImpactOS is not an emergency reporting service."},
+    {"category": "Public impact stories", "question": "Can a project publish a negative result?", "answer": "Yes. Approved stories may explain positive, negative, mixed, or inconclusive observed results and their limitations."},
+]
+
+
+def public_story_dict(story: PublicImpactStory) -> dict[str, Any]:
+    # This allowlist intentionally excludes school_id, source_project_id, user IDs,
+    # internal UUIDs, audit history, and every raw internal artifact.
+    return {
+        "slug": story.slug,
+        "title": story.title,
+        "problem_summary": story.problem_summary,
+        "evidence_summary": story.evidence_summary,
+        "research_question": story.research_question,
+        "intervention_summary": story.intervention_summary,
+        "measurement_summary": story.measurement_summary,
+        "observed_result": story.observed_result,
+        "limitations": story.limitations,
+        "what_did_not_work": story.what_did_not_work,
+        "next_steps": story.next_steps,
+        "official_response": story.official_response,
+        "category": story.category,
+        "result_type": story.result_type,
+        "status": story.status,
+        "public_team_label": story.public_team_label,
+        "is_synthetic": story.is_synthetic,
+        "published_at": dt(story.published_at),
+    }
 
 
 def new_id() -> str:
@@ -330,6 +387,8 @@ def seed_demo() -> None:
             db.add(ImpactReport(id="report-calendar-v1", project_id=project.id, version=1, immutable=True, created_by=project.leader_id, content={"problem": "Assessment Workload Concentration", "research_question": "How concentrated are major assignment deadlines across Grade 10 classes during a typical month?", "intervention": "Shared Assessment Calendar", "results": "Observed change from 8 to 5 deadlines in the selected three-day-window measure.", "limitations": "Synthetic data and a simple before/after comparison do not establish causation.", "what_did_not_work": "The calendar did not eliminate all overlap.", "next_steps": "Test with a larger approved pilot cohort."}))
         if not db.get(ImpactProject, "impact-study-space"):
             db.add(ImpactProject(id="impact-study-space", school_id=school.id, research_id=None, cluster_id="cluster-study", leader_id=users["student@demo.local"].id, mentor_id=users["mentor@demo.local"].id, title="Quiet Study Space Pilot", target_users="Students after class", intervention="Pilot a reservable quiet zone.", theory_of_change="", risks="", resources="", status="REVIEW"))
+        if not db.scalar(select(PublicImpactStory).where(PublicImpactStory.slug == "shared-assessment-calendar")):
+            db.add(PublicImpactStory(id="public-story-calendar", school_id=school.id, source_project_id="impact-calendar", slug="shared-assessment-calendar", title="Making assessment timing easier to see", problem_summary="A synthetic pilot examined whether major assignment deadlines were concentrated inside the same three-day windows.", evidence_summary="The team reviewed synthetic assessment dates for the closed-alpha scenario.", research_question="How concentrated are major assignment deadlines across Grade 10 classes during a typical month?", intervention_summary="A shared assessment calendar made upcoming major deadlines visible to the participating teaching team.", measurement_summary="The team compared a pre-intervention baseline with a later observation using one declared count measure.", observed_result="The selected synthetic measure changed from 8 to 5 deadlines in a three-day window. This is an observed change, not proof of causation.", limitations="The example uses synthetic data and a simple before/after comparison; it does not represent an SPI finding.", what_did_not_work="The calendar did not eliminate every overlap and depended on consistent updates.", next_steps="If the school approves a live pilot, confirm the measurement design and governance rules first.", official_response="Synthetic example prepared for closed-alpha demonstration.", category="ACADEMICS", result_type="MIXED", status="PUBLISHED", public_team_label="Synthetic student project team", is_synthetic=True, approved_by=users["admin@demo.local"].id, approved_at=datetime.utcnow(), published_by=users["admin@demo.local"].id, published_at=datetime.utcnow()))
         db.commit()
     finally:
         db.close()
@@ -343,12 +402,55 @@ def on_startup() -> None:
 
 @app.get(f"{API}/health")
 def health() -> dict[str, Any]:
-    return {"status": "ok", "service": "impactos-api", "mode": os.getenv("APP_MODE", "DEMO"), "synthetic_data": True}
+    return {"status": "ok", "service": "impactos-api", "mode": app_mode(), "synthetic_data": app_mode() == "DEMO"}
+
+
+@app.get(f"{API}/public/site")
+def public_site() -> dict[str, Any]:
+    return {
+        "institution": "Sekolah Pilar Indonesia",
+        "product": "Pilar Impact Lab",
+        "powered_by": "ImpactOS",
+        "official_site_url": "https://sekolah-pilar-indonesia.sch.id/",
+        "mode": app_mode(),
+        "demo_access_allowed": demo_access_allowed(),
+        "synthetic_notice": "Pilar Impact Lab is currently being developed and tested with synthetic data." if app_mode() in {"DEMO", "CLOSED_ALPHA"} else None,
+        "contact": {"status": "PENDING_SCHOOL_CONFIRMATION", "message": "Contact information will be published after the school confirms the pilot support route."},
+    }
+
+
+@app.get(f"{API}/public/faq")
+def public_faq() -> list[dict[str, str]]:
+    return PUBLIC_FAQ
+
+
+@app.get(f"{API}/public/impact-stories")
+def public_impact_stories(search: str | None = None, category: str | None = None, result_type: str | None = None, db: Session = Depends(get_db)) -> dict[str, Any]:
+    query = select(PublicImpactStory).where(PublicImpactStory.status == "PUBLISHED")
+    if search:
+        term = f"%{search.strip()}%"
+        query = query.where(PublicImpactStory.title.ilike(term) | PublicImpactStory.problem_summary.ilike(term))
+    if category:
+        query = query.where(PublicImpactStory.category == category.upper())
+    if result_type:
+        query = query.where(PublicImpactStory.result_type == result_type.upper())
+    stories = db.scalars(query.order_by(PublicImpactStory.published_at.desc())).all()
+    return {"items": [public_story_dict(story) for story in stories], "total": len(stories), "synthetic_data": app_mode() == "DEMO"}
+
+
+@app.get(f"{API}/public/impact-stories/{{slug}}")
+def public_impact_story(slug: str, db: Session = Depends(get_db)) -> dict[str, Any]:
+    story = db.scalar(select(PublicImpactStory).where(PublicImpactStory.slug == slug, PublicImpactStory.status == "PUBLISHED"))
+    if not story:
+        raise HTTPException(404, "Impact story not found.")
+    return public_story_dict(story)
 
 
 @app.post(f"{API}/auth/login")
 def login(payload: LoginRequest, response: Response, db: Session = Depends(get_db)) -> dict[str, Any]:
     user = db.scalar(select(User).where(User.email == payload.email.lower().strip()))
+    if user and user.email.endswith("@demo.local") and not demo_access_allowed():
+        user = None
     if not user or not user.active or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password.")
     session, csrf = create_session(user)
@@ -356,7 +458,7 @@ def login(payload: LoginRequest, response: Response, db: Session = Depends(get_d
     response.set_cookie(CSRF_COOKIE, csrf, httponly=False, samesite="lax", secure=False, max_age=60 * 60 * 12)
     audit(db, user, "LOGIN", "USER", user.id)
     db.commit()
-    return {"user": user_dict(user), "mode": os.getenv("APP_MODE", "DEMO"), "synthetic_data": True}
+    return {"user": user_dict(user), "mode": app_mode(), "synthetic_data": app_mode() == "DEMO"}
 
 
 @app.post(f"{API}/auth/logout", dependencies=[Depends(require_csrf)])
@@ -373,6 +475,105 @@ def me(actor: User = Depends(get_current_user)) -> User:
     return actor
 
 
+@app.get(f"{API}/auth/session")
+def auth_session(actor: User = Depends(get_current_user)) -> dict[str, Any]:
+    return {"authenticated": True, "user": user_dict(actor)}
+
+
+def invitation_state(invitation: Invitation) -> str:
+    if invitation.revoked_at:
+        return "REVOKED"
+    if invitation.used_at:
+        return "USED"
+    if invitation.expires_at <= datetime.utcnow():
+        return "EXPIRED"
+    return "ACTIVE"
+
+
+def mask_email(email: str) -> str:
+    local, _, domain = email.partition("@")
+    if len(local) <= 2:
+        masked = "•" * len(local)
+    else:
+        masked = f"{local[0]}{'•' * max(1, len(local) - 2)}{local[-1]}"
+    return f"{masked}@{domain}"
+
+
+@app.get(f"{API}/invitations/{{token}}/preview")
+def preview_invitation(token: str, db: Session = Depends(get_db)) -> dict[str, Any]:
+    invitation = db.scalar(select(Invitation).where(Invitation.token_hash == token_hash(token)))
+    if not invitation:
+        raise HTTPException(404, "This invitation is unavailable or has expired.")
+    state = invitation_state(invitation)
+    if state != "ACTIVE":
+        raise HTTPException(410, "This invitation is unavailable or has expired.")
+    school = db.get(School, invitation.school_id)
+    return {"email": mask_email(invitation.email), "role": invitation.role, "school_name": school.name if school else "Sekolah Pilar Indonesia", "expires_at": dt(invitation.expires_at)}
+
+
+@app.post(f"{API}/invitations/{{token}}/accept")
+def accept_invitation(token: str, payload: InvitationAccept, response: Response, db: Session = Depends(get_db)) -> dict[str, Any]:
+    invitation = db.scalar(select(Invitation).where(Invitation.token_hash == token_hash(token)))
+    if not invitation or invitation_state(invitation) != "ACTIVE":
+        raise HTTPException(410, "This invitation is unavailable or has expired.")
+    existing = db.scalar(select(User).where(User.email == invitation.email))
+    if existing and existing.active:
+        raise HTTPException(409, "This member account already exists. Please sign in.")
+    user = existing or User(id=new_id(), school_id=invitation.school_id, email=invitation.email, display_name=payload.display_name.strip(), role=invitation.role, password_hash=hash_password(payload.password), active=True)
+    if existing:
+        user.display_name = payload.display_name.strip()
+        user.role = invitation.role
+        user.password_hash = hash_password(payload.password)
+        user.active = True
+    db.add(user)
+    db.flush()
+    invitation.used_at = datetime.utcnow()
+    audit(db, user, "INVITATION_ACCEPTED", "INVITATION", invitation.id, {"role": user.role})
+    db.commit()
+    session, csrf = create_session(user)
+    response.set_cookie(SESSION_COOKIE, session, httponly=True, samesite="lax", secure=False, max_age=60 * 60 * 12)
+    response.set_cookie(CSRF_COOKIE, csrf, httponly=False, samesite="lax", secure=False, max_age=60 * 60 * 12)
+    return {"user": user_dict(user), "mode": app_mode()}
+
+
+@app.post(f"{API}/activation/request-email")
+def request_email_activation(payload: ActivationEmailRequest, db: Session = Depends(get_db)) -> dict[str, str]:
+    # The closed alpha intentionally does not pretend to send mail. The response
+    # is neutral to avoid account/domain enumeration.
+    normalized = payload.email.strip().lower()
+    configured_domains = [d.strip().lower() for d in os.getenv("APPROVED_EMAIL_DOMAINS", "").split(",") if d.strip()]
+    if configured_domains and normalized.rsplit("@", 1)[-1] in configured_domains:
+        audit(db, None, "ACTIVATION_EMAIL_REQUESTED", "ACTIVATION", None)
+    return {"message": "If this address is eligible, activation instructions will be sent by the school. If no school email activation is configured, ask an administrator for an invitation."}
+
+
+@app.post(f"{API}/auth/forgot-password")
+def forgot_password(payload: PasswordForgotRequest, db: Session = Depends(get_db)) -> dict[str, Any]:
+    user = db.scalar(select(User).where(User.email == payload.email.strip().lower(), User.active.is_(True)))
+    result: dict[str, Any] = {"message": "If the account can use password recovery, instructions will be provided through the configured school channel."}
+    if user and app_mode() == "DEMO" and demo_access_allowed():
+        raw = secrets.token_urlsafe(32)
+        db.add(PasswordResetToken(id=new_id(), user_id=user.id, token_hash=token_hash(raw), expires_at=datetime.utcnow() + timedelta(minutes=30)))
+        db.commit()
+        result["development_reset_token"] = raw
+    return result
+
+
+@app.post(f"{API}/auth/reset-password")
+def reset_password(payload: PasswordResetRequest, db: Session = Depends(get_db)) -> dict[str, str]:
+    reset = db.scalar(select(PasswordResetToken).where(PasswordResetToken.token_hash == token_hash(payload.token)))
+    if not reset or reset.used_at or reset.expires_at <= datetime.utcnow():
+        raise HTTPException(400, "This password reset link is unavailable or has expired.")
+    user = db.get(User, reset.user_id)
+    if not user or not user.active:
+        raise HTTPException(400, "This password reset link is unavailable or has expired.")
+    user.password_hash = hash_password(payload.password)
+    reset.used_at = datetime.utcnow()
+    audit(db, user, "PASSWORD_RESET", "USER", user.id)
+    db.commit()
+    return {"message": "Your password was updated. You can now sign in."}
+
+
 @app.get(f"{API}/dashboard")
 def dashboard(actor: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
     school = db.get(School, actor.school_id)
@@ -384,14 +585,14 @@ def dashboard(actor: User = Depends(get_current_user), db: Session = Depends(get
     notifications = db.scalars(select(Notification).where(Notification.user_id == actor.id, Notification.read.is_(False)).order_by(Notification.created_at.desc()).limit(6)).all()
     next_actions: list[dict[str, str]] = []
     if actor.role == "MENTOR":
-        next_actions = [{"title": "Review research plans", "detail": f"{review_count} plan(s) need a decision", "href": "/mentor"}]
+        next_actions = [{"title": "Review research plans", "detail": f"{review_count} plan(s) need a decision", "href": "/app/mentor"}]
     elif actor.role in {"MODERATOR", "ADMIN"}:
-        next_actions = [{"title": "Restricted moderation queue", "detail": f"{private_count} private report(s)", "href": "/moderation"}]
+        next_actions = [{"title": "Restricted moderation queue", "detail": f"{private_count} private report(s)", "href": "/app/moderation"}]
     elif actor.role == "OSIS":
-        next_actions = [{"title": "Review validated problems", "detail": f"{sum(1 for c in clusters if c.status == 'VALIDATED')} validated cluster(s)", "href": "/osis"}]
+        next_actions = [{"title": "Review validated problems", "detail": f"{sum(1 for c in clusters if c.status == 'VALIDATED')} validated cluster(s)", "href": "/app/osis"}]
     else:
-        next_actions = [{"title": "Continue the evidence-to-impact loop", "detail": "Report a measurable problem or open your active project.", "href": "/problems/new"}]
-    return {"school": {"name": school.name if school else "Pilar Impact Lab", "language": school.language if school else "en"}, "mode": os.getenv("APP_MODE", "DEMO"), "synthetic_data": True, "role": actor.role, "counts": {"clusters": len(clusters), "research": len(research), "projects": len(projects), "private_reviews": private_count, "mentor_reviews": review_count}, "next_actions": next_actions, "notifications": [{"id": n.id, "title": n.title, "message": n.message, "created_at": dt(n.created_at)} for n in notifications]}
+        next_actions = [{"title": "Continue the evidence-to-impact loop", "detail": "Report a measurable problem or open your active project.", "href": "/app/problems/new"}]
+    return {"school": {"name": school.name if school else "Pilar Impact Lab", "language": school.language if school else "en"}, "mode": app_mode(), "synthetic_data": app_mode() == "DEMO", "role": actor.role, "counts": {"clusters": len(clusters), "research": len(research), "projects": len(projects), "private_reviews": private_count, "mentor_reviews": review_count}, "next_actions": next_actions, "notifications": [{"id": n.id, "title": n.title, "message": n.message, "created_at": dt(n.created_at)} for n in notifications]}
 
 
 @app.get(f"{API}/problem-reports")
@@ -1074,3 +1275,126 @@ def update_settings(payload: dict[str, Any], actor: User = Depends(require_roles
     audit(db, actor, "SCHOOL_SETTINGS_UPDATED", "SCHOOL", actor.school_id, {"keys": list(settings.settings)})
     db.commit()
     return settings.settings
+
+
+@app.post(f"{API}/admin/invitations", dependencies=[Depends(require_csrf)])
+def create_invitation(payload: InvitationCreate, actor: User = Depends(require_roles("ADMIN")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    email = payload.email.strip().lower()
+    if "@" not in email:
+        raise HTTPException(422, "Enter a valid email address.")
+    existing = db.scalar(select(User).where(User.email == email, User.active.is_(True)))
+    if existing:
+        raise HTTPException(409, "An active account already exists for this email.")
+    raw = secrets.token_urlsafe(32)
+    invitation = Invitation(id=new_id(), school_id=actor.school_id, email=email, role=payload.role, token_hash=token_hash(raw), expires_at=datetime.utcnow() + timedelta(days=payload.expires_in_days), created_by=actor.id)
+    db.add(invitation)
+    audit(db, actor, "INVITATION_CREATED", "INVITATION", invitation.id, {"role": payload.role})
+    db.commit()
+    return {"id": invitation.id, "email": invitation.email, "role": invitation.role, "expires_at": dt(invitation.expires_at), "token": raw, "activation_path": f"/invite/{raw}"}
+
+
+@app.get(f"{API}/admin/invitations")
+def list_invitations(actor: User = Depends(require_roles("ADMIN")), db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+    rows = db.scalars(select(Invitation).where(Invitation.school_id == actor.school_id).order_by(Invitation.created_at.desc())).all()
+    return [{"id": row.id, "email": row.email, "role": row.role, "state": invitation_state(row), "expires_at": dt(row.expires_at), "created_at": dt(row.created_at)} for row in rows]
+
+
+@app.post(f"{API}/admin/invitations/{{invitation_id}}/revoke", dependencies=[Depends(require_csrf)])
+def revoke_invitation(invitation_id: str, actor: User = Depends(require_roles("ADMIN")), db: Session = Depends(get_db)) -> dict[str, str]:
+    invitation = db.get(Invitation, invitation_id)
+    if not invitation or invitation.school_id != actor.school_id:
+        raise HTTPException(404, "Invitation not found.")
+    if invitation_state(invitation) == "USED":
+        raise HTTPException(409, "Used invitations cannot be revoked.")
+    invitation.revoked_at = datetime.utcnow()
+    audit(db, actor, "INVITATION_REVOKED", "INVITATION", invitation.id)
+    db.commit()
+    return {"status": "revoked"}
+
+
+@app.post(f"{API}/admin/public-impact-stories", dependencies=[Depends(require_csrf)])
+def create_public_story(payload: dict[str, Any], actor: User = Depends(require_roles("ADMIN")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    required = ["slug", "title", "problem_summary", "intervention_summary", "measurement_summary", "observed_result", "limitations"]
+    missing = [key for key in required if not str(payload.get(key, "")).strip()]
+    if missing:
+        raise HTTPException(422, detail={"code": "PUBLIC_STORY_INCOMPLETE", "missing": missing})
+    slug = re.sub(r"[^a-z0-9-]+", "-", str(payload["slug"]).lower()).strip("-")
+    if not slug or db.scalar(select(PublicImpactStory).where(PublicImpactStory.slug == slug)):
+        raise HTTPException(409, "That public story slug is unavailable.")
+    story = PublicImpactStory(id=new_id(), school_id=actor.school_id, slug=slug, title=str(payload["title"]).strip(), problem_summary=str(payload["problem_summary"]).strip(), evidence_summary=payload.get("evidence_summary"), research_question=payload.get("research_question"), intervention_summary=str(payload["intervention_summary"]).strip(), measurement_summary=str(payload["measurement_summary"]).strip(), observed_result=str(payload["observed_result"]).strip(), limitations=str(payload["limitations"]).strip(), what_did_not_work=payload.get("what_did_not_work"), next_steps=payload.get("next_steps"), official_response=payload.get("official_response"), category=payload.get("category"), result_type=str(payload.get("result_type", "INCONCLUSIVE")).upper(), public_team_label=payload.get("public_team_label"), is_synthetic=bool(payload.get("is_synthetic", app_mode() == "DEMO")), status="DRAFT")
+    db.add(story)
+    audit(db, actor, "PUBLIC_STORY_CREATED", "PUBLIC_IMPACT_STORY", story.id, {"slug": story.slug})
+    db.commit()
+    return {"id": story.id, **public_story_dict(story)}
+
+
+@app.patch(f"{API}/admin/public-impact-stories/{{story_id}}", dependencies=[Depends(require_csrf)])
+def update_public_story(story_id: str, payload: dict[str, Any], actor: User = Depends(require_roles("ADMIN")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    story = db.get(PublicImpactStory, story_id)
+    if not story or story.school_id != actor.school_id:
+        raise HTTPException(404, "Public story not found.")
+    if story.status in {"PUBLISHED", "WITHDRAWN"}:
+        raise HTTPException(409, "Published or withdrawn stories require a new version.")
+    allowed = {"title", "problem_summary", "evidence_summary", "research_question", "intervention_summary", "measurement_summary", "observed_result", "limitations", "what_did_not_work", "next_steps", "official_response", "category", "result_type", "public_team_label", "is_synthetic"}
+    for key, value in payload.items():
+        if key in allowed:
+            setattr(story, key, value)
+    story.version += 1
+    audit(db, actor, "PUBLIC_STORY_UPDATED", "PUBLIC_IMPACT_STORY", story.id, {"version": story.version})
+    db.commit()
+    return {"id": story.id, **public_story_dict(story)}
+
+
+@app.post(f"{API}/admin/public-impact-stories/{{story_id}}/submit-review", dependencies=[Depends(require_csrf)])
+def submit_public_story_review(story_id: str, actor: User = Depends(require_roles("ADMIN")), db: Session = Depends(get_db)) -> dict[str, str]:
+    story = db.get(PublicImpactStory, story_id)
+    if not story or story.school_id != actor.school_id:
+        raise HTTPException(404, "Public story not found.")
+    if story.status != "DRAFT":
+        raise HTTPException(409, "Only draft stories can be submitted.")
+    story.status = "REVIEW"
+    audit(db, actor, "PUBLIC_STORY_SUBMITTED", "PUBLIC_IMPACT_STORY", story.id)
+    db.commit()
+    return {"status": story.status}
+
+
+@app.post(f"{API}/admin/public-impact-stories/{{story_id}}/approve", dependencies=[Depends(require_csrf)])
+def approve_public_story(story_id: str, actor: User = Depends(require_roles("ADMIN")), db: Session = Depends(get_db)) -> dict[str, str]:
+    story = db.get(PublicImpactStory, story_id)
+    if not story or story.school_id != actor.school_id:
+        raise HTTPException(404, "Public story not found.")
+    if story.status != "REVIEW":
+        raise HTTPException(409, "Only stories in review can be approved.")
+    story.status = "APPROVED"
+    story.approved_by = actor.id
+    story.approved_at = datetime.utcnow()
+    audit(db, actor, "PUBLIC_STORY_APPROVED", "PUBLIC_IMPACT_STORY", story.id)
+    db.commit()
+    return {"status": story.status}
+
+
+@app.post(f"{API}/admin/public-impact-stories/{{story_id}}/publish", dependencies=[Depends(require_csrf)])
+def publish_public_story(story_id: str, actor: User = Depends(require_roles("ADMIN")), db: Session = Depends(get_db)) -> dict[str, str]:
+    story = db.get(PublicImpactStory, story_id)
+    if not story or story.school_id != actor.school_id:
+        raise HTTPException(404, "Public story not found.")
+    if story.status != "APPROVED":
+        raise HTTPException(409, "Only approved stories can be published.")
+    story.status = "PUBLISHED"
+    story.published_by = actor.id
+    story.published_at = datetime.utcnow()
+    audit(db, actor, "PUBLIC_STORY_PUBLISHED", "PUBLIC_IMPACT_STORY", story.id, {"slug": story.slug})
+    db.commit()
+    return {"status": story.status, "slug": story.slug}
+
+
+@app.post(f"{API}/admin/public-impact-stories/{{story_id}}/withdraw", dependencies=[Depends(require_csrf)])
+def withdraw_public_story(story_id: str, actor: User = Depends(require_roles("ADMIN")), db: Session = Depends(get_db)) -> dict[str, str]:
+    story = db.get(PublicImpactStory, story_id)
+    if not story or story.school_id != actor.school_id:
+        raise HTTPException(404, "Public story not found.")
+    story.status = "WITHDRAWN"
+    story.withdrawn_at = datetime.utcnow()
+    audit(db, actor, "PUBLIC_STORY_WITHDRAWN", "PUBLIC_IMPACT_STORY", story.id)
+    db.commit()
+    return {"status": story.status}

@@ -15,7 +15,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const body = text ? JSON.parse(text) : null;
   if (!response.ok) {
     const detail = body?.detail;
-    const message = typeof detail === "string" ? detail : detail?.message || "The request could not be completed.";
+    let message = typeof detail === "string" ? detail : detail?.message || "The request could not be completed.";
+    if (message === "Not Found") message = "The member service is temporarily unavailable. Please try again.";
     throw new Error(message);
   }
   return body as T;
@@ -23,6 +24,15 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export const api = {
   login: (email: string, password: string) => request<{ user: import("./types").User; mode: string; synthetic_data: boolean }>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
+  publicSite: () => request<any>("/public/site"),
+  publicFaq: () => request<any[]>("/public/faq"),
+  publicImpactStories: (params = "") => request<{ items: any[]; total: number; synthetic_data: boolean }>(`/public/impact-stories${params}`),
+  publicImpactStory: (slug: string) => request<any>(`/public/impact-stories/${encodeURIComponent(slug)}`),
+  invitationPreview: (token: string) => request<any>(`/invitations/${encodeURIComponent(token)}/preview`),
+  acceptInvitation: (token: string, payload: Record<string, unknown>) => request<any>(`/invitations/${encodeURIComponent(token)}/accept`, { method: "POST", body: JSON.stringify(payload) }),
+  requestEmailActivation: (email: string) => request<any>("/activation/request-email", { method: "POST", body: JSON.stringify({ email }) }),
+  forgotPassword: (email: string) => request<any>("/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) }),
+  resetPassword: (token: string, password: string) => request<any>("/auth/reset-password", { method: "POST", body: JSON.stringify({ token, password }) }),
   logout: () => request<{ status: string }>("/auth/logout", { method: "POST" }),
   me: () => request<import("./types").User>("/me"),
   dashboard: () => request<any>("/dashboard"),
@@ -54,5 +64,10 @@ export const api = {
   mentorAttention: () => request<any>("/mentor/attention"),
   osis: () => request<any>("/osis/overview"),
   adminLogs: () => request<any[]>("/admin/audit-logs"),
+  adminInvitations: () => request<any[]>("/admin/invitations"),
+  createInvitation: (payload: Record<string, unknown>) => request<any>("/admin/invitations", { method: "POST", body: JSON.stringify(payload) }),
+  revokeInvitation: (id: string) => request<any>(`/admin/invitations/${id}/revoke`, { method: "POST" }),
+  createPublicStory: (payload: Record<string, unknown>) => request<any>("/admin/public-impact-stories", { method: "POST", body: JSON.stringify(payload) }),
+  publicStoryAction: (id: string, action: "submit-review" | "approve" | "publish" | "withdraw") => request<any>(`/admin/public-impact-stories/${id}/${action}`, { method: "POST" }),
   notifications: () => request<any[]>("/notifications"),
 };

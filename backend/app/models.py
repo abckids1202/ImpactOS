@@ -291,3 +291,58 @@ class AuditLog(Base):
     metadata_safe: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
 
+
+class Invitation(Base):
+    __tablename__ = "invitations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    school_id: Mapped[str] = mapped_column(ForeignKey("schools.id"), index=True)
+    email: Mapped[str] = mapped_column(String(255), index=True)
+    role: Mapped[str] = mapped_column(String(30), default="STUDENT")
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class PasswordResetToken(Base):
+    __tablename__ = "password_reset_tokens"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class PublicImpactStory(Base):
+    __tablename__ = "public_impact_stories"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    school_id: Mapped[str] = mapped_column(ForeignKey("schools.id"), index=True)
+    source_project_id: Mapped[Optional[str]] = mapped_column(ForeignKey("impact_projects.id"), nullable=True)
+    slug: Mapped[str] = mapped_column(String(180), unique=True, index=True)
+    title: Mapped[str] = mapped_column(String(240))
+    problem_summary: Mapped[str] = mapped_column(Text)
+    evidence_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    research_question: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    intervention_summary: Mapped[str] = mapped_column(Text)
+    measurement_summary: Mapped[str] = mapped_column(Text)
+    observed_result: Mapped[str] = mapped_column(Text)
+    limitations: Mapped[str] = mapped_column(Text)
+    what_did_not_work: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    next_steps: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    official_response: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    category: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    result_type: Mapped[str] = mapped_column(String(30), default="INCONCLUSIVE")
+    status: Mapped[str] = mapped_column(String(30), default="DRAFT", index=True)
+    public_team_label: Mapped[Optional[str]] = mapped_column(String(160), nullable=True)
+    is_synthetic: Mapped[bool] = mapped_column(Boolean, default=True)
+    approved_by: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id"), nullable=True)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    published_by: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id"), nullable=True)
+    published_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    withdrawn_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)

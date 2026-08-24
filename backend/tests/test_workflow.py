@@ -1,4 +1,5 @@
 import pytest
+from uuid import uuid4
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -105,3 +106,79 @@ def test_activation_requires_primary_metric_and_baseline(client: TestClient) -> 
     response = client.post("/api/v1/impact-projects/impact-study-space/activate", headers=csrf_headers(client))
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "BASELINE_REQUIRED"
+
+
+def test_public_site_and_story_serializer_are_allowlisted(client: TestClient) -> None:
+    site = client.get("/api/v1/public/site")
+    assert site.status_code == 200
+    assert site.json()["product"] == "Pilar Impact Lab"
+    assert site.json()["powered_by"] == "ImpactOS"
+    stories = client.get("/api/v1/public/impact-stories")
+    assert stories.status_code == 200
+    assert stories.json()["items"]
+    forbidden = {"id", "school_id", "source_project_id", "approved_by", "published_by", "raw_report", "email"}
+    assert forbidden.isdisjoint(stories.json()["items"][0])
+
+
+def test_unauthenticated_workspace_endpoint_is_protected(client: TestClient) -> None:
+    response = client.get("/api/v1/problem-clusters")
+    assert response.status_code == 401
+
+
+def test_invitation_is_single_use_and_assigns_controlled_role(client: TestClient) -> None:
+    login(client, "admin@demo.local")
+    email = f"alpha-{uuid4().hex[:10]}@example.test"
+    created = client.post(
+        "/api/v1/admin/invitations",
+        headers=csrf_headers(client),
+        json={"email": email, "role": "MENTOR", "expires_in_days": 2},
+    )
+    assert created.status_code == 200, created.text
+    raw_token = created.json()["token"]
+    preview = client.get(f"/api/v1/invitations/{raw_token}/preview")
+    assert preview.status_code == 200
+    assert preview.json()["role"] == "MENTOR"
+    accepted = client.post(
+        f"/api/v1/invitations/{raw_token}/accept",
+        json={"display_name": "Alpha Mentor", "password": "alpha-password-123"},
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["user"]["role"] == "MENTOR"
+    assert client.get("/api/v1/invitations/{}/preview".format(raw_token)).status_code == 410
+    assert client.post("/api/v1/auth/login", json={"email": email, "password": "alpha-password-123"}).status_code == 200
+
+
+def test_demo_accounts_are_disabled_outside_demo(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    monkeypatch.setenv("APP_MODE", "PRODUCTION")
+    response = client.post("/api/v1/auth/login", json={"email": "student@demo.local", "password": "demo1234"})
+    assert response.status_code == 401
+
+
+def test_public_story_requires_approval_and_can_be_withdrawn(client: TestClient) -> None:
+    login(client, "admin@demo.local")
+    slug = f"alpha-story-{uuid4().hex[:8]}"
+    created = client.post(
+        "/api/v1/admin/public-impact-stories",
+        headers=csrf_headers(client),
+        json={
+            "slug": slug,
+            "title": "A reviewed synthetic story",
+            "problem_summary": "A synthetic problem summary.",
+            "intervention_summary": "A synthetic intervention.",
+            "measurement_summary": "A declared before and after measure.",
+            "observed_result": "An observed mixed result.",
+            "limitations": "Synthetic data only.",
+            "result_type": "MIXED",
+            "is_synthetic": True,
+        },
+    )
+    assert created.status_code == 200, created.text
+    story_id = created.json()["id"]
+    assert client.get(f"/api/v1/public/impact-stories/{slug}").status_code == 404
+    for action in ("submit-review", "approve", "publish"):
+        response = client.post(f"/api/v1/admin/public-impact-stories/{story_id}/{action}", headers=csrf_headers(client))
+        assert response.status_code == 200, response.text
+    assert client.get(f"/api/v1/public/impact-stories/{slug}").status_code == 200
+    withdrawn = client.post(f"/api/v1/admin/public-impact-stories/{story_id}/withdraw", headers=csrf_headers(client))
+    assert withdrawn.status_code == 200
+    assert client.get(f"/api/v1/public/impact-stories/{slug}").status_code == 404
