@@ -1,4 +1,4 @@
-export type Role = "STUDENT" | "STUDENT_LEADER" | "MENTOR" | "OSIS" | "MODERATOR" | "ADMIN";
+export type Role = "STUDENT_CONTRIBUTOR" | "STUDENT_PROJECT_LEADER" | "MENTOR" | "OSIS_REVIEWER" | "MODERATOR" | "ADMINISTRATOR" | "STUDENT" | "STUDENT_LEADER" | "OSIS" | "ADMIN";
 
 export interface User {
   id: string;
@@ -27,6 +27,11 @@ export interface Cluster {
   reports: Report[];
   evidence: Evidence[];
   official_updates: OfficialUpdate[];
+  followed?: boolean;
+  priority?: string | null;
+  priority_rationale?: string | null;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface Report {

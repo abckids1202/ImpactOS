@@ -28,6 +28,7 @@ def upgrade() -> None:
         "users": [("status", sa.String(20), sa.text("'ACTIVE'")), ("last_login_at", sa.DateTime(), None), ("updated_at", sa.DateTime(), None)],
         "invitations": [("status", sa.String(20), sa.text("'PENDING'")), ("invited_by", sa.String(36), None), ("used_by", sa.String(36), None)],
         "audit_logs": [("actor_user_id", sa.String(36), None), ("request_id", sa.String(80), None)],
+        "reviews": [("reviewed_version", sa.Integer(), None)],
     }
     for table, columns in additions.items():
         if not inspector.has_table(table):
@@ -51,6 +52,7 @@ def downgrade() -> None:
         "invitations": ("used_by", "invited_by", "status"),
         "users": ("updated_at", "last_login_at", "status"),
         "schools": ("updated_at", "is_active"),
+        "reviews": ("reviewed_version",),
     }.items():
         with op.batch_alter_table(table) as batch:
             for column in columns:

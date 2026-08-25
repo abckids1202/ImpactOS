@@ -123,6 +123,28 @@ class ProblemSignal(Base):
     __table_args__ = (UniqueConstraint("cluster_id", "user_id", "signal_type", name="uq_signal_once"),)
 
 
+class ProblemFollow(Base):
+    __tablename__ = "problem_follows"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    cluster_id: Mapped[str] = mapped_column(ForeignKey("problem_clusters.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    __table_args__ = (UniqueConstraint("cluster_id", "user_id", name="uq_problem_follow"),)
+
+
+class ProblemPriority(Base):
+    __tablename__ = "problem_priorities"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    cluster_id: Mapped[str] = mapped_column(ForeignKey("problem_clusters.id"), index=True)
+    school_id: Mapped[str] = mapped_column(ForeignKey("schools.id"), index=True)
+    assigned_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    priority: Mapped[str] = mapped_column(String(20), default="MEDIUM")
+    rationale: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+    __table_args__ = (UniqueConstraint("cluster_id", "school_id", name="uq_problem_priority_school"),)
+
+
 class Evidence(Base):
     __tablename__ = "evidence_items"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -198,6 +220,7 @@ class Review(Base):
     reviewer_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
     decision: Mapped[str] = mapped_column(String(40))
     reason: Mapped[str] = mapped_column(Text, default="")
+    reviewed_version: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 

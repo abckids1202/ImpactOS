@@ -34,15 +34,15 @@ ROLE_ALIASES = {
 }
 
 ROLE_PERMISSIONS: dict[str, set[str]] = {
-    "STUDENT_CONTRIBUTOR": {"app.access", "profile.read_own", "profile.update_own", "problem_report.create"},
-    "STUDENT_PROJECT_LEADER": {"app.access", "profile.read_own", "profile.update_own", "problem_report.create", "research_project.manage"},
-    "MENTOR": {"app.access", "profile.read_own", "profile.update_own", "mentor.review"},
-    "OSIS_REVIEWER": {"app.access", "profile.read_own", "profile.update_own", "osis.review"},
-    "MODERATOR": {"app.access", "profile.read_own", "profile.update_own", "moderation.review"},
+    "STUDENT_CONTRIBUTOR": {"app.access", "profile.read_own", "profile.update_own", "problem.read_public_school", "problem_report.create", "problem.signal", "problem.follow", "task.read_assigned", "task.update_assigned"},
+    "STUDENT_PROJECT_LEADER": {"app.access", "profile.read_own", "profile.update_own", "problem.read_public_school", "problem_report.create", "problem.signal", "problem.follow", "research.create", "research.read_assigned", "research.manage_assigned", "research.submit_review", "research_project.manage", "impact.read_assigned", "task.read_assigned", "task.update_assigned"},
+    "MENTOR": {"app.access", "profile.read_own", "profile.update_own", "problem.read_public_school", "research.read_assigned", "mentor.review", "impact.read_assigned", "task.read_assigned"},
+    "OSIS_REVIEWER": {"app.access", "profile.read_own", "profile.update_own", "problem.read_public_school", "problem.signal", "osis.review", "osis.priority_manage", "osis.official_update_manage"},
+    "MODERATOR": {"app.access", "profile.read_own", "profile.update_own", "problem.read_public_school", "moderation.review", "moderation.restricted_read", "moderation.cluster_manage"},
     "ADMINISTRATOR": {
         "app.access", "profile.read_own", "profile.update_own", "admin.members.read", "admin.members.manage",
-        "admin.invitations.manage", "admin.audit.read", "problem_report.create", "research_project.manage",
-        "mentor.review", "osis.review", "moderation.review",
+        "admin.invitations.manage", "admin.audit.read", "problem.read_public_school", "problem_report.create", "problem.signal", "problem.follow",
+        "research.create", "research.read_assigned", "research.manage_assigned", "research.submit_review", "research_project.manage", "mentor.review", "osis.review", "osis.priority_manage", "osis.official_update_manage", "moderation.review", "moderation.restricted_read", "moderation.cluster_manage", "impact.read_assigned", "task.read_assigned", "task.update_assigned",
     },
 }
 

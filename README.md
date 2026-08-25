@@ -13,8 +13,10 @@ This repository now contains the closed-alpha implementation baseline and the pl
 - Invite-only-style demo accounts with signed HTTP-only sessions and CSRF protection. Demo access is disabled when `APP_MODE=PRODUCTION` or `ENVIRONMENT=production`.
 - Explicit public impact-story records and allowlisted serializers; internal reports, identities, evidence, surveys, moderation, and audit data never cross the public API boundary.
 - React + TypeScript + Vite frontend in `frontend/`.
+- Role-aware member workspace with centralized navigation and dashboards for student contributors, project leaders, mentors, OSIS reviewers, moderators, and administrators. Each workspace exposes only the records and actions allowed by the signed-in membership.
+- Connected closed-alpha scenario for “Long canteen queues during the second break,” including student reports and follows, moderation decisions, a versioned research plan, mentor review, an OSIS priority/update draft, an impact project, and assigned tasks.
 - Real API-backed workflows for dashboard, problem reports, private moderation, clusters, signals, evidence, research plans, mentor review, surveys, analysis/export, impact projects, metrics, baseline activation, observations, impact reports, OSIS overview, notifications, and audit logs.
-- Synthetic seed data with the golden path: Assessment Workload Concentration → Deadline research → Shared Assessment Calendar → observed change.
+- Synthetic seed data also retains the original golden path: Assessment Workload Concentration → Deadline research → Shared Assessment Calendar → observed change.
 - Planning and discovery artifacts in `docs/`.
 
 ## Run locally
@@ -81,6 +83,7 @@ The app displays a persistent `DEMO DATA` label. Demo-role switching is intentio
 ```powershell
 python -m pytest backend\tests -q
 cd frontend
+npm test -- --run
 npm run lint
 npm run build
 ```

@@ -41,15 +41,22 @@ export const api = {
   me: async () => {
     const result = await request<any>("/auth/me");
     const membership = result.memberships?.[0];
-    const role = (membership?.roles?.[0] || "STUDENT") as import("./types").Role;
+    const canonicalRole = membership?.roles?.[0] || "STUDENT_CONTRIBUTOR";
+    const legacyRole = ({ STUDENT_CONTRIBUTOR: "STUDENT", STUDENT_PROJECT_LEADER: "STUDENT_LEADER", OSIS_REVIEWER: "OSIS", ADMINISTRATOR: "ADMIN" } as Record<string, string>)[canonicalRole] || canonicalRole;
+    const role = legacyRole as import("./types").Role;
     return { ...result.user, role, school_id: membership?.school?.id || "", school_name: membership?.school?.name, roles: membership?.roles || [], permissions: membership?.permissions || [], membership_id: membership?.id } as import("./types").User;
   },
-  dashboard: () => request<any>("/dashboard"),
-  clusters: () => request<import("./types").Cluster[]>("/problem-clusters"),
-  cluster: (id: string) => request<import("./types").Cluster>(`/problem-clusters/${id}`),
+  dashboard: (workspace?: string) => request<any>(workspace ? `/dashboard?workspace=${encodeURIComponent(workspace)}` : "/dashboard"),
+  clusters: (params = "") => request<import("./types").Cluster[]>(`/problems${params}`),
+  cluster: (id: string) => request<import("./types").Cluster>(`/problems/${id}`),
+  myReports: () => request<any[]>("/problem-reports/mine"),
+  report: (id: string) => request<any>(`/problem-reports/${id}`),
   createReport: (payload: Record<string, unknown>) => request<any>("/problem-reports", { method: "POST", body: JSON.stringify(payload) }),
   submitReport: (id: string) => request<any>(`/problem-reports/${id}/submit`, { method: "POST" }),
-  addSignal: (id: string, signal_type: string) => request<import("./types").Cluster>(`/problem-clusters/${id}/signals`, { method: "POST", body: JSON.stringify({ signal_type }) }),
+  addSignal: (id: string, signal_type: string) => request<import("./types").Cluster>(`/problems/${id}/signals`, { method: "POST", body: JSON.stringify({ signal_type }) }),
+  removeSignal: (id: string, signal_type: string) => request<import("./types").Cluster>(`/problems/${id}/signals/${encodeURIComponent(signal_type)}`, { method: "DELETE" }),
+  followProblem: (id: string) => request<import("./types").Cluster>(`/problems/${id}/follow`, { method: "POST" }),
+  unfollowProblem: (id: string) => request<import("./types").Cluster>(`/problems/${id}/follow`, { method: "DELETE" }),
   addEvidence: (id: string, payload: Record<string, unknown>) => request<import("./types").Cluster>(`/problem-clusters/${id}/evidence`, { method: "POST", body: JSON.stringify(payload) }),
   createResearch: (cluster_id: string, title: string) => request<import("./types").Research>("/research-projects", { method: "POST", body: JSON.stringify({ cluster_id, title }) }),
   research: (id: string) => request<import("./types").Research>(`/research-projects/${id}`),
@@ -69,9 +76,17 @@ export const api = {
   saveReport: (id: string, content: Record<string, unknown>) => request<any>(`/impact-projects/${id}/report`, { method: "PUT", body: JSON.stringify({ content }) }),
   submitReportForReview: (id: string) => request<any>(`/impact-projects/${id}/submit-report`, { method: "POST" }),
   moderation: () => request<any>("/moderation/queue"),
+  moderationReport: (id: string) => request<any>(`/moderation/reports/${id}`),
   moderationDecision: (id: string, decision: string, reason: string) => request<any>(`/moderation/problem-reports/${id}/visibility-decision`, { method: "POST", body: JSON.stringify({ decision, reason }) }),
+  moderationAction: (id: string, decision: string, reason: string) => request<any>(`/moderation/reports/${id}/decision`, { method: "POST", body: JSON.stringify({ decision, reason }) }),
   mentorAttention: () => request<any>("/mentor/attention"),
+  mentorReviews: () => request<any>("/mentor/reviews"),
   osis: () => request<any>("/osis/overview"),
+  osisPriorities: () => request<any>("/osis/priorities"),
+  setPriority: (id: string, priority: string, rationale: string) => request<any>(`/osis/problems/${id}/priority`, { method: "POST", body: JSON.stringify({ priority, rationale }) }),
+  officialUpdate: (id: string, status: string, message: string) => request<any>(`/problem-clusters/${id}/official-updates`, { method: "POST", body: JSON.stringify({ status, message }) }),
+  tasks: (query = "") => request<any>(`/tasks/mine${query}`),
+  updateTask: (id: string, status: string) => request<any>(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify({ status }) }),
   adminLogs: () => request<any[]>("/admin/audit-logs"),
   adminAudit: () => request<any[]>("/admin/audit"),
   adminMembers: (query = "") => request<any[]>(`/admin/members${query}`),

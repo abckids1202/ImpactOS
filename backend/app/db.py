@@ -60,6 +60,9 @@ def ensure_schema() -> None:
             "actor_user_id": "VARCHAR(36)",
             "request_id": "VARCHAR(80)",
         },
+        "reviews": {
+            "reviewed_version": "INTEGER",
+        },
     }
     inspector = inspect(engine)
     with engine.begin() as connection:

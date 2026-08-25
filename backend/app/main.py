@@ -33,6 +33,8 @@ from .models import (
     Observation,
     OfficialUpdate,
     ProblemCluster,
+    ProblemFollow,
+    ProblemPriority,
     ProblemReport,
     ProblemSignal,
     PublicImpactStory,
@@ -76,10 +78,12 @@ from .schemas import (
     AuthMeResponse,
     PasswordForgotRequest,
     PasswordResetRequest,
+    PriorityRequest,
     RoleAssignmentRequest,
     SurveyCreate,
     SurveyQuestionCreate,
     SurveyResponseCreate,
+    TaskUpdate,
     UserRead,
 )
 from .security import (
@@ -93,6 +97,7 @@ from .security import (
     normalize_role,
     password_needs_upgrade,
     require_csrf,
+    require_permissions,
     require_roles,
     revoke_all_sessions,
     revoke_session,
@@ -282,6 +287,11 @@ def notify(db: Session, user_id: str | None, title: str, message: str) -> None:
         db.add(Notification(id=new_id(), user_id=user_id, title=title, message=message))
 
 
+def has_active_role(db: Session, user: User, *roles: str) -> bool:
+    allowed = {normalize_role(role) for role in roles}
+    return bool(allowed.intersection(active_role_codes(db, user)))
+
+
 def require_same_school(actor: User, school_id: str) -> None:
     if actor.school_id != school_id:
         raise HTTPException(status_code=404, detail="Record not found.")
@@ -289,7 +299,7 @@ def require_same_school(actor: User, school_id: str) -> None:
 
 def role_guard(actor: User, *roles: str) -> None:
     if actor.role not in roles:
-        raise HTTPException(status_code=403, detail="You do not have permission for this action.")
+        raise HTTPException(status_code=403, detail={"code": "PERMISSION_DENIED", "message": "You do not have permission for this action."})
 
 
 def transition(db: Session, actor: User, entity: Any, entity_type: str, new_status: str, allowed: dict[str, set[str]], reason: str = "") -> None:
@@ -314,7 +324,7 @@ def transition(db: Session, actor: User, entity: Any, entity_type: str, new_stat
 
 PROBLEM_TRANSITIONS = {
     "DRAFT": {"MODERATION_REVIEW", "PRIVATE_REVIEW"},
-    "MODERATION_REVIEW": {"PUBLISHED", "PRIVATE_REVIEW", "ARCHIVED"},
+    "MODERATION_REVIEW": {"PUBLISHED", "PRIVATE_REVIEW", "CHANGES_REQUESTED", "ARCHIVED"},
     "PRIVATE_REVIEW": {"PUBLISHED", "ARCHIVED"},
     "PUBLISHED": {"MERGED", "ARCHIVED"},
     "MERGED": {"PUBLISHED", "ARCHIVED"},
@@ -359,7 +369,8 @@ def plan_missing(content: dict[str, Any]) -> list[str]:
 
 def report_dict(db: Session, report: ProblemReport, actor: User) -> dict[str, Any]:
     author = db.get(User, report.author_id)
-    show_author = report.visibility != "SCHOOL_ANONYMOUS" or actor.role in {"MODERATOR", "ADMIN"} or actor.id == report.author_id
+    reviewer = has_active_role(db, actor, "MODERATOR", "ADMIN")
+    show_author = report.visibility != "SCHOOL_ANONYMOUS" or reviewer or actor.id == report.author_id
     return {
         "id": report.id,
         "title": report.title,
@@ -373,7 +384,7 @@ def report_dict(db: Session, report: ProblemReport, actor: User) -> dict[str, An
         "status": report.status,
         "cluster_id": report.cluster_id,
         "author": author.display_name if show_author and author else "Anonymous student",
-        "sensitivity_reason": report.sensitivity_reason if actor.role in {"MODERATOR", "ADMIN"} else None,
+        "sensitivity_reason": report.sensitivity_reason if reviewer else None,
         "created_at": dt(report.created_at),
         "updated_at": dt(report.updated_at),
     }
@@ -387,7 +398,10 @@ def cluster_dict(db: Session, cluster: ProblemCluster, actor: User) -> dict[str,
     signal_counts: dict[str, int] = {}
     for signal in signals:
         signal_counts[signal.signal_type] = signal_counts.get(signal.signal_type, 0) + 1
-    visible_reports = [r for r in reports if r.status in {"PUBLISHED", "MERGED"} or actor.role in {"MODERATOR", "ADMIN"}]
+    reviewer = has_active_role(db, actor, "MODERATOR", "ADMIN")
+    visible_reports = [r for r in reports if r.status in {"PUBLISHED", "MERGED"} or reviewer]
+    followed = db.scalar(select(ProblemFollow).where(ProblemFollow.cluster_id == cluster.id, ProblemFollow.user_id == actor.id)) is not None
+    priority = db.scalar(select(ProblemPriority).where(ProblemPriority.cluster_id == cluster.id, ProblemPriority.school_id == actor.school_id))
     return {
         "id": cluster.id,
         "title": cluster.title,
@@ -395,10 +409,12 @@ def cluster_dict(db: Session, cluster: ProblemCluster, actor: User) -> dict[str,
         "category": cluster.category,
         "scope": cluster.scope,
         "status": cluster.status,
-        "priority_rationale": cluster.priority_rationale,
         "affected_count": signal_counts.get("AFFECTS_ME", 0),
         "evidence_count": len(evidence),
         "report_count": len(visible_reports),
+        "followed": followed,
+        "priority": priority.priority if priority else None,
+        "priority_rationale": priority.rationale if priority else cluster.priority_rationale,
         "signal_counts": signal_counts,
         "reports": [report_dict(db, r, actor) for r in visible_reports],
         "evidence": [{"id": e.id, "source": e.source, "type": e.evidence_type, "observation_date": e.observation_date, "relevance": e.relevance, "visibility": e.visibility, "file_name": e.file_name} for e in evidence],
@@ -411,7 +427,10 @@ def cluster_dict(db: Session, cluster: ProblemCluster, actor: User) -> dict[str,
 def research_dict(db: Session, research: ResearchProject) -> dict[str, Any]:
     versions = db.scalars(select(ResearchPlanVersion).where(ResearchPlanVersion.research_id == research.id).order_by(ResearchPlanVersion.version.desc())).all()
     plan = versions[0].content if versions else {}
-    return {"id": research.id, "title": research.title, "cluster_id": research.cluster_id, "leader_id": research.leader_id, "mentor_id": research.mentor_id, "status": research.status, "plan": plan, "plan_version": versions[0].version if versions else 0, "plan_immutable": versions[0].immutable if versions else False, "missing_sections": plan_missing(plan), "created_at": dt(research.created_at), "updated_at": dt(research.updated_at)}
+    reviews = db.scalars(select(Review).where(Review.entity_type == "RESEARCH_PROJECT", Review.entity_id == research.id).order_by(Review.created_at.desc())).all()
+    leader = db.get(User, research.leader_id)
+    mentor = db.get(User, research.mentor_id) if research.mentor_id else None
+    return {"id": research.id, "title": research.title, "cluster_id": research.cluster_id, "leader_id": research.leader_id, "leader_name": leader.display_name if leader else None, "mentor_id": research.mentor_id, "mentor_name": mentor.display_name if mentor else None, "status": research.status, "plan": plan, "plan_version": versions[0].version if versions else 0, "plan_immutable": versions[0].immutable if versions else False, "missing_sections": plan_missing(plan), "versions": [{"version": version.version, "submitted": version.submitted, "immutable": version.immutable, "created_at": dt(version.created_at), "content": version.content} for version in versions], "review_history": [{"id": review.id, "decision": review.decision, "reason": review.reason, "reviewed_version": review.reviewed_version, "reviewer_id": review.reviewer_id, "created_at": dt(review.created_at)} for review in reviews], "created_at": dt(research.created_at), "updated_at": dt(research.updated_at)}
 
 
 def impact_dict(db: Session, project: ImpactProject) -> dict[str, Any]:
@@ -429,7 +448,7 @@ def impact_dict(db: Session, project: ImpactProject) -> dict[str, Any]:
         metric_rows.append({"id": metric.id, "name": metric.name, "description": metric.description, "unit": metric.unit, "direction": metric.direction, "target": metric.target, "is_primary": metric.is_primary, "observations": [{"id": o.id, "phase": o.phase, "value": o.value, "observed_on": o.observed_on, "sample_size": o.sample_size, "notes": o.notes} for o in observations], "observed_change": change, "observed_change_percent": pct})
     tasks = db.scalars(select(ProjectTask).where(ProjectTask.project_id == project.id)).all()
     report = db.scalars(select(ImpactReport).where(ImpactReport.project_id == project.id).order_by(ImpactReport.version.desc())).first()
-    return {"id": project.id, "title": project.title, "research_id": project.research_id, "cluster_id": project.cluster_id, "leader_id": project.leader_id, "mentor_id": project.mentor_id, "status": project.status, "target_users": project.target_users, "intervention": project.intervention, "theory_of_change": project.theory_of_change, "risks": project.risks, "resources": project.resources, "metrics": metric_rows, "tasks": [{"id": t.id, "title": t.title, "status": t.status, "priority": t.priority, "due_date": t.due_date} for t in tasks], "report": report.content if report else None, "report_version": report.version if report else 0, "created_at": dt(project.created_at), "updated_at": dt(project.updated_at)}
+    return {"id": project.id, "title": project.title, "research_id": project.research_id, "cluster_id": project.cluster_id, "leader_id": project.leader_id, "mentor_id": project.mentor_id, "status": project.status, "target_users": project.target_users, "intervention": project.intervention, "theory_of_change": project.theory_of_change, "risks": project.risks, "resources": project.resources, "metrics": metric_rows, "tasks": [{"id": t.id, "title": t.title, "status": t.status, "priority": t.priority, "due_date": t.due_date, "owner_id": t.owner_id, "project_id": t.project_id, "href": f"/app/projects/{t.project_id}"} for t in tasks], "report": report.content if report else None, "report_version": report.version if report else 0, "created_at": dt(project.created_at), "updated_at": dt(project.updated_at)}
 
 
 def seed_demo() -> None:
@@ -519,6 +538,69 @@ def seed_demo() -> None:
             db.add(ImpactProject(id="impact-study-space", school_id=school.id, research_id=None, cluster_id="cluster-study", leader_id=users["student@demo.local"].id, mentor_id=users["mentor@demo.local"].id, title="Quiet Study Space Pilot", target_users="Students after class", intervention="Pilot a reservable quiet zone.", theory_of_change="", risks="", resources="", status="REVIEW"))
         if not db.scalar(select(PublicImpactStory).where(PublicImpactStory.slug == "shared-assessment-calendar")):
             db.add(PublicImpactStory(id="public-story-calendar", school_id=school.id, source_project_id="impact-calendar", slug="shared-assessment-calendar", title="Making assessment timing easier to see", problem_summary="A synthetic pilot examined whether major assignment deadlines were concentrated inside the same three-day windows.", evidence_summary="The team reviewed synthetic assessment dates for the closed-alpha scenario.", research_question="How concentrated are major assignment deadlines across Grade 10 classes during a typical month?", intervention_summary="A shared assessment calendar made upcoming major deadlines visible to the participating teaching team.", measurement_summary="The team compared a pre-intervention baseline with a later observation using one declared count measure.", observed_result="The selected synthetic measure changed from 8 to 5 deadlines in a three-day window. This is an observed change, not proof of causation.", limitations="The example uses synthetic data and a simple before/after comparison; it does not represent an SPI finding.", what_did_not_work="The calendar did not eliminate every overlap and depended on consistent updates.", next_steps="If the school approves a live pilot, confirm the measurement design and governance rules first.", official_response="Synthetic example prepared for closed-alpha demonstration.", category="ACADEMICS", result_type="MIXED", status="PUBLISHED", public_team_label="Synthetic student project team", is_synthetic=True, approved_by=users["admin@demo.local"].id, approved_at=datetime.utcnow(), published_by=users["admin@demo.local"].id, published_at=datetime.utcnow()))
+
+        # Connected closed-alpha scenario: student observations → moderation →
+        # validated problem → research review → planned intervention → OSIS update.
+        canteen = db.get(ProblemCluster, "cluster-canteen")
+        if canteen:
+            canteen.title = "Long canteen queues during the second break"
+            canteen.summary = "Students report that the main canteen queue regularly exceeds a reasonable waiting time during the second break."
+            canteen.category = "FACILITIES"
+            canteen.scope = "Main canteen · second break"
+            canteen.status = "VALIDATED"
+        db.flush()
+        canteen_reports = [
+            ("report-canteen-1", "user-student", "Queue reaches the hallway during second break", "PUBLISHED", "SCHOOL_NAMED"),
+            ("report-canteen-2", "user-student", "Waiting for lunch takes most of second break", "MERGED", "SCHOOL_ANONYMOUS"),
+            ("report-canteen-3", "user-leader", "The ordering line slows down at the drink station", "MERGED", "SCHOOL_NAMED"),
+            ("report-canteen-4", "user-multi", "Canteen queue is longest on club days", "PUBLISHED", "SCHOOL_ANONYMOUS"),
+            ("report-canteen-5", "user-student", "Students skip lunch when the line is too long", "PUBLISHED", "SCHOOL_ANONYMOUS"),
+            ("report-canteen-6", "user-leader", "Second break queue needs a measured baseline", "MODERATION_REVIEW", "SCHOOL_NAMED"),
+            ("report-canteen-7", "user-student", "Private synthetic report for restricted review", "PRIVATE_REVIEW", "PRIVATE_REVIEW"),
+        ]
+        for report_id, author_id, title, state, visibility in canteen_reports:
+            report = db.get(ProblemReport, report_id)
+            if not report:
+                report = ProblemReport(id=report_id, school_id=school.id, author_id=author_id, title=title, description="Synthetic students observed a recurring canteen waiting pattern during the second break; this record exists only for closed-alpha testing.", affected_group="Students using the main canteen", scope="Second break", category="FACILITIES", frequency="Most school days", severity="MEDIUM", visibility=visibility, status=state, cluster_id="cluster-canteen", sensitivity_reason="synthetic restricted fixture" if state == "PRIVATE_REVIEW" else None)
+                db.add(report)
+            else:
+                report.cluster_id = "cluster-canteen"
+                report.status = state
+                report.visibility = visibility
+        db.flush()
+        for signal_id, user_id, signal_type in [
+            ("signal-canteen-aisha", "user-student", "AFFECTS_ME"),
+            ("signal-canteen-leader", "user-leader", "WANTS_TO_INVESTIGATE"),
+            ("signal-canteen-multi", "user-multi", "HAS_EVIDENCE"),
+        ]:
+            if not db.get(ProblemSignal, signal_id):
+                db.add(ProblemSignal(id=signal_id, cluster_id="cluster-canteen", user_id=user_id, signal_type=signal_type))
+        for evidence_id, source, relevance in [
+            ("evidence-canteen-queue", "Synthetic queue observation sheet", "Seven closed-alpha observations describe second-break waiting time without collecting student names."),
+            ("evidence-canteen-lane", "Synthetic canteen layout note", "The drink station is a visible bottleneck to test in a future approved pilot."),
+        ]:
+            if not db.get(Evidence, evidence_id):
+                db.add(Evidence(id=evidence_id, school_id=school.id, author_id=users["leader@demo.local"].id, cluster_id="cluster-canteen", source=source, evidence_type="OBSERVATION", observation_date="2026-08-20", relevance=relevance, visibility="SCHOOL"))
+        for follow_id, user_id in [("follow-canteen-aisha", "user-student"), ("follow-canteen-leader", "user-leader")]:
+            existing_follow = db.scalar(select(ProblemFollow).where(ProblemFollow.cluster_id == "cluster-canteen", ProblemFollow.user_id == user_id))
+            if not existing_follow:
+                db.add(ProblemFollow(id=follow_id, cluster_id="cluster-canteen", user_id=user_id))
+        if not db.get(ResearchProject, "research-canteen"):
+            db.add(ResearchProject(id="research-canteen", school_id=school.id, cluster_id="cluster-canteen", leader_id=users["leader@demo.local"].id, title="Investigating average canteen waiting time", status="MENTOR_REVIEW", mentor_id=users["mentor@demo.local"].id))
+            db.flush()
+            plan_content = {"question": "What is the median student waiting time at the main canteen during the second break?", "question_type": "descriptive", "purpose": "Describe the queue pattern before choosing an intervention.", "population": "Students using the main canteen during the second break", "method": "Time-stamped observation at the queue entrance and service point", "sampling": "Four second-break observations across two school days", "data_collection": "Aggregate minutes only; no student names or purchase details", "ethics": "Do not photograph faces or collect identifying information; tell students the observation is synthetic for this closed alpha.", "limitations": "The small synthetic observation window cannot represent all school days.", "conclusion_boundary": "Describe observed waiting time; do not claim a cause or universal student experience."}
+            db.add(ResearchPlanVersion(id="plan-canteen-v1", research_id="research-canteen", version=1, content={**plan_content, "sampling": "One second-break observation only; revise before any real pilot."}, submitted=True, immutable=True, created_by=users["leader@demo.local"].id))
+            db.add(ResearchPlanVersion(id="plan-canteen-v2", research_id="research-canteen", version=2, content=plan_content, submitted=True, immutable=False, created_by=users["leader@demo.local"].id))
+            db.add(Review(id="review-canteen-changes", school_id=school.id, entity_type="RESEARCH_PROJECT", entity_id="research-canteen", reviewer_id=users["mentor@demo.local"].id, decision="REQUEST_CHANGES", reason="Please revise the sampling method so observations cover more than one second break.", reviewed_version=1))
+        if not db.get(ImpactProject, "impact-canteen"):
+            db.add(ImpactProject(id="impact-canteen", school_id=school.id, research_id="research-canteen", cluster_id="cluster-canteen", leader_id=users["leader@demo.local"].id, mentor_id=users["mentor@demo.local"].id, title="Staggered ordering lane pilot", target_users="Students using the main canteen during second break", intervention="Test a clearly marked staggered ordering lane after the baseline is approved.", theory_of_change="If service flow is separated at the drink station, median waiting time may decrease.", risks="A changed queue may shift congestion elsewhere; the pilot must be monitored.", resources="Canteen staff agreement, observation sheet, temporary signs", status="PLANNING"))
+            db.flush()
+            db.add(Metric(id="metric-canteen-wait", project_id="impact-canteen", name="Median canteen waiting time", description="Median observed waiting time from joining the queue to receiving an order.", unit="minutes", direction="DECREASE", collection_method="Anonymous time-stamped observations", target=7, is_primary=True))
+            for task_id, title, owner_id, due_date in [("task-canteen-schedule", "Confirm observation schedule", "user-leader", "2026-09-02"), ("task-canteen-sampling", "Revise sampling method", "user-leader", "2026-09-03"), ("task-canteen-baseline", "Collect baseline observations", "user-multi", "2026-09-05"), ("task-canteen-update", "Prepare OSIS update", "user-osis", "2026-09-06")]:
+                db.add(ProjectTask(id=task_id, project_id="impact-canteen", title=title, owner_id=owner_id, status="TODO", priority="HIGH" if "baseline" in task_id else "MEDIUM", due_date=due_date))
+        if not db.get(OfficialUpdate, "update-canteen-draft"):
+            db.add(OfficialUpdate(id="update-canteen-draft", school_id=school.id, cluster_id="cluster-canteen", author_id=users["osis@demo.local"].id, status="DRAFT", message="The OSIS team is reviewing a validated synthetic concern about second-break canteen waiting time. No intervention result has been claimed."))
+        db.flush()
         db.commit()
     finally:
         db.close()
@@ -762,31 +844,87 @@ def reset_password(payload: PasswordResetRequest, request: Request, db: Session 
 
 
 @app.get(f"{API}/dashboard")
-def dashboard(actor: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+def dashboard(workspace: str | None = None, actor: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
     school = db.get(School, actor.school_id)
-    clusters = db.scalars(select(ProblemCluster).where(ProblemCluster.school_id == actor.school_id)).all()
-    research = db.scalars(select(ResearchProject).where(ResearchProject.school_id == actor.school_id)).all()
-    projects = db.scalars(select(ImpactProject).where(ImpactProject.school_id == actor.school_id)).all()
-    private_count = db.scalar(select(func.count()).select_from(ProblemReport).where(ProblemReport.school_id == actor.school_id, ProblemReport.status == "PRIVATE_REVIEW")) or 0
-    review_count = db.scalar(select(func.count()).select_from(ResearchProject).where(ResearchProject.school_id == actor.school_id, ResearchProject.status == "MENTOR_REVIEW")) or 0
-    notifications = db.scalars(select(Notification).where(Notification.user_id == actor.id, Notification.read.is_(False)).order_by(Notification.created_at.desc()).limit(6)).all()
-    next_actions: list[dict[str, str]] = []
-    if actor.role == "MENTOR":
-        next_actions = [{"title": "Review research plans", "detail": f"{review_count} plan(s) need a decision", "href": "/app/mentor"}]
-    elif actor.role in {"MODERATOR", "ADMIN"}:
-        next_actions = [{"title": "Restricted moderation queue", "detail": f"{private_count} private report(s)", "href": "/app/moderation"}]
-    elif actor.role == "OSIS":
-        next_actions = [{"title": "Review validated problems", "detail": f"{sum(1 for c in clusters if c.status == 'VALIDATED')} validated cluster(s)", "href": "/app/osis"}]
-    else:
-        next_actions = [{"title": "Continue the evidence-to-impact loop", "detail": "Report a measurable problem or open your active project.", "href": "/app/problems/new"}]
-    return {"school": {"name": school.name if school else "Pilar Impact Lab", "language": school.language if school else "en"}, "mode": app_mode(), "synthetic_data": app_mode() == "DEMO", "role": actor.role, "counts": {"clusters": len(clusters), "research": len(research), "projects": len(projects), "private_reviews": private_count, "mentor_reviews": review_count}, "next_actions": next_actions, "notifications": [{"id": n.id, "title": n.title, "message": n.message, "created_at": dt(n.created_at)} for n in notifications]}
+    active_roles = active_role_codes(db, actor)
+    selected_role = normalize_role(workspace) if workspace and normalize_role(workspace) in active_roles else active_roles[0] if active_roles else "STUDENT_CONTRIBUTOR"
+    role_name, role_description = ROLE_DETAILS.get(selected_role, (selected_role.replace("_", " ").title(), "Member workspace"))
+
+    own_reports = db.scalars(select(ProblemReport).where(ProblemReport.school_id == actor.school_id, ProblemReport.author_id == actor.id).order_by(ProblemReport.updated_at.desc()).limit(6)).all()
+    followed_clusters = db.scalars(select(ProblemCluster).join(ProblemFollow, ProblemFollow.cluster_id == ProblemCluster.id).where(ProblemFollow.user_id == actor.id, ProblemCluster.school_id == actor.school_id).order_by(ProblemCluster.updated_at.desc()).limit(6)).all()
+    own_tasks = db.scalars(select(ProjectTask).where(ProjectTask.owner_id == actor.id).order_by(ProjectTask.due_date, ProjectTask.title).limit(8)).all()
+    leader_research = db.scalars(select(ResearchProject).where(ResearchProject.school_id == actor.school_id, ResearchProject.leader_id == actor.id).order_by(ResearchProject.updated_at.desc()).limit(6)).all()
+    mentor_research = db.scalars(select(ResearchProject).where(ResearchProject.school_id == actor.school_id, ResearchProject.mentor_id == actor.id).order_by(ResearchProject.updated_at.desc()).limit(8)).all()
+    leader_projects = db.scalars(select(ImpactProject).where(ImpactProject.school_id == actor.school_id, ImpactProject.leader_id == actor.id).order_by(ImpactProject.updated_at.desc()).limit(6)).all()
+    mentor_projects = db.scalars(select(ImpactProject).where(ImpactProject.school_id == actor.school_id, ImpactProject.mentor_id == actor.id).order_by(ImpactProject.updated_at.desc()).limit(6)).all()
+    validated_clusters = db.scalars(select(ProblemCluster).where(ProblemCluster.school_id == actor.school_id, ProblemCluster.status == "VALIDATED").order_by(ProblemCluster.updated_at.desc()).limit(8)).all()
+    moderation_reports = db.scalars(select(ProblemReport).where(ProblemReport.school_id == actor.school_id, ProblemReport.status.in_(["MODERATION_REVIEW", "PRIVATE_REVIEW"])).order_by(ProblemReport.updated_at)).all()
+    notifications = db.scalars(select(Notification).where(Notification.user_id == actor.id).order_by(Notification.created_at.desc()).limit(6)).all()
+    updates = db.scalars(select(OfficialUpdate).where(OfficialUpdate.school_id == actor.school_id, OfficialUpdate.status != "PUBLISHED").order_by(OfficialUpdate.created_at.desc()).limit(6)).all()
+
+    def task_item(task: ProjectTask) -> dict[str, Any]:
+        return {"id": task.id, "title": task.title, "status": task.status, "priority": task.priority, "due_date": task.due_date, "href": f"/app/projects/{task.project_id}"}
+
+    def research_item(item: ResearchProject) -> dict[str, Any]:
+        return {"id": item.id, "title": item.title, "status": item.status, "href": f"/app/research/{item.id}", "cluster_id": item.cluster_id}
+
+    def project_item(item: ImpactProject) -> dict[str, Any]:
+        return {"id": item.id, "title": item.title, "status": item.status, "href": f"/app/projects/{item.id}", "cluster_id": item.cluster_id}
+
+    attention: list[dict[str, Any]] = []
+    my_work: list[dict[str, Any]] = []
+    role_sections: dict[str, Any] = {}
+    primary_action = {"label": "Report a concern", "href": "/app/problems/new", "permission": "problem_report.create"}
+    if selected_role == "STUDENT_CONTRIBUTOR":
+        primary_action = {"label": "Report a concern", "href": "/app/problems/new", "permission": "problem_report.create"}
+        my_work = [{"id": r.id, "title": r.title, "status": r.status, "href": f"/app/reports/{r.id}"} for r in own_reports] + [{"id": c.id, "title": c.title, "status": "FOLLOWING", "href": f"/app/problems/{c.id}"} for c in followed_clusters]
+        role_sections = {"my_recent_reports": [{"id": r.id, "title": r.title, "status": r.status, "href": f"/app/reports/{r.id}"} for r in own_reports], "followed_problems": [{"id": c.id, "title": c.title, "status": c.status, "href": f"/app/problems/{c.id}"} for c in followed_clusters]}
+        if not own_reports:
+            attention.append({"id": "student-report", "title": "Start with a recurring concern", "detail": "Describe an observable issue affecting school life.", "href": "/app/problems/new"})
+    elif selected_role == "STUDENT_PROJECT_LEADER":
+        primary_action = {"label": "Continue active project" if leader_research or leader_projects else "Start from an approved problem", "href": f"/app/research/{leader_research[0].id}" if leader_research else "/app/problems" , "permission": "research.create"}
+        my_work = [research_item(r) for r in leader_research] + [project_item(p) for p in leader_projects] + [task_item(t) for t in own_tasks]
+        attention = [{"id": r.id, "title": r.title, "detail": "Plan awaiting mentor review." if r.status == "MENTOR_REVIEW" else "Continue your research workspace.", "href": f"/app/research/{r.id}"} for r in leader_research if r.status in {"MENTOR_REVIEW", "CHANGES_REQUESTED", "DRAFT"}][:4]
+        role_sections = {"research": [research_item(r) for r in leader_research], "projects": [project_item(p) for p in leader_projects], "tasks": [task_item(t) for t in own_tasks]}
+    elif selected_role == "MENTOR":
+        primary_action = {"label": "Review next submission", "href": "/app/mentor/reviews", "permission": "mentor.review"}
+        attention = [{"id": r.id, "title": r.title, "detail": "Research plan needs your decision.", "href": f"/app/research/{r.id}"} for r in mentor_research if r.status == "MENTOR_REVIEW"]
+        my_work = [research_item(r) for r in mentor_research] + [project_item(p) for p in mentor_projects]
+        role_sections = {"reviews_awaiting_attention": [research_item(r) for r in mentor_research if r.status == "MENTOR_REVIEW"], "assigned_research": [research_item(r) for r in mentor_research], "assigned_projects": [project_item(p) for p in mentor_projects]}
+    elif selected_role == "OSIS_REVIEWER":
+        primary_action = {"label": "Review school priorities", "href": "/app/osis/priorities", "permission": "osis.priority_manage"}
+        attention = [{"id": c.id, "title": c.title, "detail": "Validated problem ready for prioritization.", "href": f"/app/problems/{c.id}"} for c in validated_clusters]
+        my_work = [{"id": c.id, "title": c.title, "status": c.status, "href": f"/app/problems/{c.id}"} for c in validated_clusters]
+        role_sections = {"validated_problems": my_work, "official_updates": [{"id": u.id, "title": "Official update draft", "detail": u.message, "status": u.status, "href": f"/app/problems/{u.cluster_id}"} for u in updates]}
+    elif selected_role == "MODERATOR":
+        primary_action = {"label": "Review next report", "href": "/app/moderation/reports", "permission": "moderation.review"}
+        attention = [{"id": r.id, "title": r.title, "detail": "Restricted review." if r.status == "PRIVATE_REVIEW" else "New report awaiting moderation.", "href": f"/app/moderation/reports/{r.id}"} for r in moderation_reports]
+        my_work = attention
+        role_sections = {"new_reports": [a for a in attention if next((r.status for r in moderation_reports if r.id == a["id"]), "") == "MODERATION_REVIEW"], "restricted_reports": [a for a in attention if next((r.status for r in moderation_reports if r.id == a["id"]), "") == "PRIVATE_REVIEW"]}
+    elif selected_role == "ADMINISTRATOR":
+        primary_action = {"label": "Invite SPI member", "href": "/app/admin/invitations", "permission": "admin.invitations.manage"}
+        active_members = db.scalar(select(func.count()).select_from(User).where(User.school_id == actor.school_id, User.active.is_(True))) or 0
+        deactivated_members = db.scalar(select(func.count()).select_from(User).where(User.school_id == actor.school_id, User.active.is_(False))) or 0
+        pending_invitations = db.scalar(select(func.count()).select_from(Invitation).where(Invitation.school_id == actor.school_id, Invitation.status == "PENDING", Invitation.expires_at > datetime.utcnow())) or 0
+        attention = [{"id": "admin-invites", "title": "Pending invitations", "detail": f"{pending_invitations} invitation(s) awaiting activation.", "href": "/app/admin/invitations"}, {"id": "admin-members", "title": "Membership oversight", "detail": f"{active_members} active and {deactivated_members} deactivated member(s).", "href": "/app/admin/members"}]
+        role_sections = {"members": {"active": active_members, "deactivated": deactivated_members}, "pending_invitations": pending_invitations}
+
+    summary = {"my_open_reports": sum(1 for r in own_reports if r.status not in {"ARCHIVED", "MERGED"}), "followed_problems": len(followed_clusters), "incomplete_tasks": sum(1 for t in own_tasks if t.status != "COMPLETED"), "attention_count": len(attention)}
+    recent = [{"id": n.id, "title": n.title, "message": n.message, "href": "/app/notifications", "created_at": dt(n.created_at)} for n in notifications]
+    return {"viewer": {"id": actor.id, "display_name": actor.display_name, "school": {"id": school.id if school else actor.school_id, "name": school.name if school else "Pilar Impact Lab", "slug": school.slug if school else "pilar-impact-lab"}, "roles": [{"code": code, "label": ROLE_DETAILS.get(code, (code.replace("_", " ").title(), ""))[0]} for code in active_roles], "active_workspace": selected_role, "responsibility": role_description}, "primary_action": primary_action, "summary": summary, "attention_items": attention, "my_work": my_work, "recent_updates": recent, "role_sections": role_sections, "mode": app_mode(), "synthetic_data": app_mode() == "DEMO"}
 
 
 @app.get(f"{API}/problem-reports")
 def list_reports(actor: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[dict[str, Any]]:
     reports = db.scalars(select(ProblemReport).where(ProblemReport.school_id == actor.school_id).order_by(ProblemReport.updated_at.desc())).all()
-    if actor.role not in {"MODERATOR", "ADMIN"}:
+    if not has_active_role(db, actor, "MODERATOR", "ADMIN"):
         reports = [r for r in reports if r.author_id == actor.id or r.status in {"PUBLISHED", "MERGED"}]
+    return [report_dict(db, report, actor) for report in reports]
+
+
+@app.get(f"{API}/problem-reports/mine")
+def list_my_reports(actor: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+    reports = db.scalars(select(ProblemReport).where(ProblemReport.school_id == actor.school_id, ProblemReport.author_id == actor.id).order_by(ProblemReport.updated_at.desc())).all()
     return [report_dict(db, report, actor) for report in reports]
 
 
@@ -805,9 +943,10 @@ def update_report(report_id: str, payload: ProblemUpdate, actor: User = Depends(
     if not report:
         raise HTTPException(404, "Report not found.")
     require_same_school(actor, report.school_id)
-    if report.author_id != actor.id and actor.role not in {"MODERATOR", "ADMIN"}:
+    reviewer = has_active_role(db, actor, "MODERATOR", "ADMIN")
+    if report.author_id != actor.id and not reviewer:
         raise HTTPException(403, "Only the author or a moderator can edit this report.")
-    if report.status not in {"DRAFT", "CHANGES_REQUESTED"} and actor.role not in {"MODERATOR", "ADMIN"}:
+    if report.status not in {"DRAFT", "CHANGES_REQUESTED"} and not reviewer:
         raise HTTPException(409, "Submitted reports are not editable by students.")
     for key, value in payload.model_dump(exclude_none=True).items():
         setattr(report, key, value)
@@ -822,7 +961,7 @@ def get_report(report_id: str, actor: User = Depends(get_current_user), db: Sess
     if not report:
         raise HTTPException(404, "Report not found.")
     require_same_school(actor, report.school_id)
-    if report.status == "PRIVATE_REVIEW" and actor.id != report.author_id and actor.role not in {"MODERATOR", "ADMIN"}:
+    if report.status == "PRIVATE_REVIEW" and actor.id != report.author_id and not has_active_role(db, actor, "MODERATOR", "ADMIN"):
         raise HTTPException(404, "Report not found.")
     return report_dict(db, report, actor)
 
@@ -833,7 +972,7 @@ def submit_report(report_id: str, actor: User = Depends(get_current_user), db: S
     if not report:
         raise HTTPException(404, "Report not found.")
     require_same_school(actor, report.school_id)
-    if report.author_id != actor.id and actor.role not in {"MODERATOR", "ADMIN"}:
+    if report.author_id != actor.id and not has_active_role(db, actor, "MODERATOR", "ADMIN"):
         raise HTTPException(403, "Only the author can submit this report.")
     if report.status != "DRAFT":
         raise HTTPException(409, "Only a draft can be submitted.")
@@ -848,22 +987,38 @@ def submit_report(report_id: str, actor: User = Depends(get_current_user), db: S
 
 
 @app.get(f"{API}/problem-clusters")
-def list_clusters(actor: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-    clusters = db.scalars(select(ProblemCluster).where(ProblemCluster.school_id == actor.school_id).order_by(ProblemCluster.updated_at.desc())).all()
+@app.get(f"{API}/problems")
+def list_clusters(search: str = "", category: str = "", status: str = "", sort: str = "updated", actor: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+    query = select(ProblemCluster).where(ProblemCluster.school_id == actor.school_id)
+    if search.strip():
+        term = f"%{search.strip()}%"
+        query = query.where(ProblemCluster.title.ilike(term) | ProblemCluster.summary.ilike(term))
+    if category.strip():
+        query = query.where(ProblemCluster.category == category.upper())
+    if status.strip():
+        query = query.where(ProblemCluster.status == status.upper())
+    if has_active_role(db, actor, "OSIS") and not has_active_role(db, actor, "MODERATOR", "ADMIN"):
+        query = query.where(ProblemCluster.status == "VALIDATED")
+    order_column = ProblemCluster.title if sort == "title" else ProblemCluster.created_at if sort == "created" else ProblemCluster.updated_at
+    clusters = db.scalars(query.order_by(order_column.desc())).all()
     return [cluster_dict(db, cluster, actor) for cluster in clusters]
 
 
 @app.get(f"{API}/problem-clusters/{{cluster_id}}")
+@app.get(f"{API}/problems/{{cluster_id}}")
 def get_cluster(cluster_id: str, actor: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
     cluster = db.get(ProblemCluster, cluster_id)
     if not cluster:
         raise HTTPException(404, "Problem cluster not found.")
     require_same_school(actor, cluster.school_id)
+    if has_active_role(db, actor, "OSIS") and not has_active_role(db, actor, "MODERATOR", "ADMIN") and cluster.status != "VALIDATED":
+        raise HTTPException(404, "Problem cluster not found.")
     return cluster_dict(db, cluster, actor)
 
 
 @app.post(f"{API}/problem-clusters/{{cluster_id}}/signals", dependencies=[Depends(require_csrf)])
-def add_signal(cluster_id: str, payload: SignalCreate, actor: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+@app.post(f"{API}/problems/{{cluster_id}}/signals", dependencies=[Depends(require_csrf)])
+def add_signal(cluster_id: str, payload: SignalCreate, actor: User = Depends(require_permissions("problem.signal")), db: Session = Depends(get_db)) -> dict[str, Any]:
     cluster = db.get(ProblemCluster, cluster_id)
     if not cluster:
         raise HTTPException(404, "Problem cluster not found.")
@@ -878,7 +1033,8 @@ def add_signal(cluster_id: str, payload: SignalCreate, actor: User = Depends(get
 
 
 @app.delete(f"{API}/problem-clusters/{{cluster_id}}/signals/{{signal_type}}", dependencies=[Depends(require_csrf)])
-def delete_signal(cluster_id: str, signal_type: str, actor: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+@app.delete(f"{API}/problems/{{cluster_id}}/signals/{{signal_type}}", dependencies=[Depends(require_csrf)])
+def delete_signal(cluster_id: str, signal_type: str, actor: User = Depends(require_permissions("problem.signal")), db: Session = Depends(get_db)) -> dict[str, Any]:
     signal = db.scalar(select(ProblemSignal).where(ProblemSignal.cluster_id == cluster_id, ProblemSignal.user_id == actor.id, ProblemSignal.signal_type == signal_type))
     if signal:
         db.delete(signal)
@@ -890,8 +1046,38 @@ def delete_signal(cluster_id: str, signal_type: str, actor: User = Depends(get_c
     return cluster_dict(db, cluster, actor)
 
 
+@app.post(f"{API}/problem-clusters/{{cluster_id}}/follow", dependencies=[Depends(require_csrf)])
+@app.post(f"{API}/problems/{{cluster_id}}/follow", dependencies=[Depends(require_csrf)])
+def follow_problem(cluster_id: str, actor: User = Depends(require_permissions("problem.follow")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    cluster = db.get(ProblemCluster, cluster_id)
+    if not cluster:
+        raise HTTPException(404, "Problem cluster not found.")
+    require_same_school(actor, cluster.school_id)
+    existing = db.scalar(select(ProblemFollow).where(ProblemFollow.cluster_id == cluster_id, ProblemFollow.user_id == actor.id))
+    if not existing:
+        db.add(ProblemFollow(id=new_id(), cluster_id=cluster_id, user_id=actor.id))
+        audit(db, actor, "PROBLEM_FOLLOWED", "PROBLEM_CLUSTER", cluster_id)
+        db.commit()
+    return cluster_dict(db, cluster, actor)
+
+
+@app.delete(f"{API}/problem-clusters/{{cluster_id}}/follow", dependencies=[Depends(require_csrf)])
+@app.delete(f"{API}/problems/{{cluster_id}}/follow", dependencies=[Depends(require_csrf)])
+def unfollow_problem(cluster_id: str, actor: User = Depends(require_permissions("problem.follow")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    cluster = db.get(ProblemCluster, cluster_id)
+    if not cluster:
+        raise HTTPException(404, "Problem cluster not found.")
+    require_same_school(actor, cluster.school_id)
+    existing = db.scalar(select(ProblemFollow).where(ProblemFollow.cluster_id == cluster_id, ProblemFollow.user_id == actor.id))
+    if existing:
+        db.delete(existing)
+        audit(db, actor, "PROBLEM_UNFOLLOWED", "PROBLEM_CLUSTER", cluster_id)
+        db.commit()
+    return cluster_dict(db, cluster, actor)
+
+
 @app.post(f"{API}/problem-clusters/{{cluster_id}}/evidence", dependencies=[Depends(require_csrf)])
-def add_evidence(cluster_id: str, payload: EvidenceCreate, actor: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+def add_evidence(cluster_id: str, payload: EvidenceCreate, actor: User = Depends(require_permissions("problem_report.create")), db: Session = Depends(get_db)) -> dict[str, Any]:
     cluster = db.get(ProblemCluster, cluster_id)
     if not cluster:
         raise HTTPException(404, "Problem cluster not found.")
@@ -904,31 +1090,43 @@ def add_evidence(cluster_id: str, payload: EvidenceCreate, actor: User = Depends
 
 
 @app.get(f"{API}/moderation/queue")
+@app.get(f"{API}/moderation/reports")
 def moderation_queue(actor: User = Depends(require_roles("MODERATOR", "ADMIN")), db: Session = Depends(get_db)) -> dict[str, Any]:
     reports = db.scalars(select(ProblemReport).where(ProblemReport.school_id == actor.school_id, ProblemReport.status.in_(["PRIVATE_REVIEW", "MODERATION_REVIEW"])).order_by(ProblemReport.created_at)).all()
     return {"private": [report_dict(db, r, actor) for r in reports if r.status == "PRIVATE_REVIEW"], "visibility": [report_dict(db, r, actor) for r in reports if r.status == "MODERATION_REVIEW"], "duplicate_candidates": [{"report_id": r.id, "candidates": []} for r in reports]}
 
 
+@app.get(f"{API}/moderation/reports/{{report_id}}")
+def moderation_report(report_id: str, actor: User = Depends(require_permissions("moderation.review")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    report = db.get(ProblemReport, report_id)
+    if not report or report.school_id != actor.school_id or report.status not in {"MODERATION_REVIEW", "PRIVATE_REVIEW", "CHANGES_REQUESTED"}:
+        raise HTTPException(404, "Moderation report not found.")
+    return report_dict(db, report, actor)
+
+
 @app.post(f"{API}/moderation/problem-reports/{{report_id}}/visibility-decision", dependencies=[Depends(require_csrf)])
+@app.post(f"{API}/moderation/reports/{{report_id}}/decision", dependencies=[Depends(require_csrf)])
 def visibility_decision(report_id: str, payload: DecisionRequest, actor: User = Depends(require_roles("MODERATOR", "ADMIN")), db: Session = Depends(get_db)) -> dict[str, Any]:
     report = db.get(ProblemReport, report_id)
     if not report:
         raise HTTPException(404, "Report not found.")
     require_same_school(actor, report.school_id)
     decision = payload.decision.upper()
-    if decision == "PUBLISH":
+    if decision in {"PUBLISH", "APPROVE_FOR_CLUSTERING"}:
         if not report.cluster_id:
             cluster = ProblemCluster(id=new_id(), school_id=actor.school_id, title=report.title, summary=report.description, category=report.category, scope=report.scope, status="GATHERING_EVIDENCE")
             db.add(cluster)
             db.flush()
             report.cluster_id = cluster.id
         target = "PUBLISHED"
-    elif decision == "KEEP_PRIVATE":
+    elif decision in {"KEEP_PRIVATE", "ROUTE_TO_RESTRICTED_REVIEW"}:
         target = "PRIVATE_REVIEW"
+    elif decision == "RETURN_FOR_CLARIFICATION":
+        target = "CHANGES_REQUESTED"
     elif decision == "ARCHIVE":
         target = "ARCHIVED"
     else:
-        raise HTTPException(422, "Decision must be PUBLISH, KEEP_PRIVATE, or ARCHIVE.")
+        raise HTTPException(422, "Choose approve, return, restrict, or archive.")
     if report.status != target:
         transition(db, actor, report, "PROBLEM_REPORT", target, PROBLEM_TRANSITIONS, payload.reason)
     audit(db, actor, "VISIBILITY_DECISION", "PROBLEM_REPORT", report.id, {"decision": decision})
@@ -971,7 +1169,7 @@ def unmerge_report(report_id: str, payload: DecisionRequest, actor: User = Depen
 
 
 @app.post(f"{API}/problem-clusters/{{cluster_id}}/official-updates", dependencies=[Depends(require_csrf)])
-def official_update(cluster_id: str, payload: OfficialUpdateCreate, actor: User = Depends(require_roles("OSIS", "MODERATOR", "ADMIN")), db: Session = Depends(get_db)) -> dict[str, Any]:
+def official_update(cluster_id: str, payload: OfficialUpdateCreate, actor: User = Depends(require_permissions("osis.official_update_manage")), db: Session = Depends(get_db)) -> dict[str, Any]:
     cluster = db.get(ProblemCluster, cluster_id)
     if not cluster:
         raise HTTPException(404, "Problem cluster not found.")
@@ -981,13 +1179,40 @@ def official_update(cluster_id: str, payload: OfficialUpdateCreate, actor: User 
     cluster.updated_at = datetime.utcnow()
     for report in db.scalars(select(ProblemReport).where(ProblemReport.cluster_id == cluster_id)).all():
         notify(db, report.author_id, "Official update", payload.message)
-    audit(db, actor, "OFFICIAL_UPDATE_PUBLISHED", "PROBLEM_CLUSTER", cluster_id, {"status": payload.status})
+    if payload.status.upper() not in {"DRAFT", "PUBLISHED"}:
+        raise HTTPException(422, "Official updates must be drafts or published updates.")
+    audit(db, actor, "OFFICIAL_UPDATE_CREATED", "OFFICIAL_UPDATE", update.id, {"status": payload.status.upper(), "cluster_id": cluster_id})
+    db.commit()
+    return cluster_dict(db, cluster, actor)
+
+
+@app.get(f"{API}/osis/priorities")
+def osis_priorities(actor: User = Depends(require_permissions("osis.review")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    clusters = db.scalars(select(ProblemCluster).where(ProblemCluster.school_id == actor.school_id, ProblemCluster.status == "VALIDATED").order_by(ProblemCluster.updated_at.desc())).all()
+    return {"items": [cluster_dict(db, cluster, actor) for cluster in clusters], "non_sensitive_only": True}
+
+
+@app.post(f"{API}/osis/problems/{{cluster_id}}/priority", dependencies=[Depends(require_csrf)])
+def set_osis_priority(cluster_id: str, payload: PriorityRequest, actor: User = Depends(require_permissions("osis.priority_manage")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    cluster = db.get(ProblemCluster, cluster_id)
+    if not cluster or cluster.school_id != actor.school_id or cluster.status != "VALIDATED":
+        raise HTTPException(404, "Validated problem not found.")
+    priority = db.scalar(select(ProblemPriority).where(ProblemPriority.cluster_id == cluster_id, ProblemPriority.school_id == actor.school_id))
+    if not priority:
+        priority = ProblemPriority(id=new_id(), cluster_id=cluster_id, school_id=actor.school_id, assigned_by=actor.id, priority=payload.priority, rationale=payload.rationale)
+        db.add(priority)
+    else:
+        priority.priority = payload.priority
+        priority.rationale = payload.rationale
+        priority.assigned_by = actor.id
+    cluster.updated_at = datetime.utcnow()
+    audit(db, actor, "OSIS_PRIORITY_SET", "PROBLEM_CLUSTER", cluster_id, {"priority": payload.priority})
     db.commit()
     return cluster_dict(db, cluster, actor)
 
 
 @app.post(f"{API}/research-projects", dependencies=[Depends(require_csrf)])
-def create_research(payload: ResearchCreate, actor: User = Depends(require_roles("STUDENT", "STUDENT_LEADER", "MENTOR", "ADMIN")), db: Session = Depends(get_db)) -> dict[str, Any]:
+def create_research(payload: ResearchCreate, actor: User = Depends(require_permissions("research.create")), db: Session = Depends(get_db)) -> dict[str, Any]:
     cluster = db.get(ProblemCluster, payload.cluster_id)
     if not cluster:
         raise HTTPException(404, "Problem cluster not found.")
@@ -1004,9 +1229,9 @@ def create_research(payload: ResearchCreate, actor: User = Depends(require_roles
 @app.get(f"{API}/research-projects")
 def list_research(actor: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[dict[str, Any]]:
     query = select(ResearchProject).where(ResearchProject.school_id == actor.school_id)
-    if actor.role == "MENTOR":
+    if has_active_role(db, actor, "MENTOR") and not has_active_role(db, actor, "ADMIN", "STUDENT_PROJECT_LEADER"):
         query = query.where(ResearchProject.mentor_id == actor.id)
-    elif actor.role in {"STUDENT", "STUDENT_LEADER"}:
+    elif has_active_role(db, actor, "STUDENT", "STUDENT_LEADER") and not has_active_role(db, actor, "ADMIN", "MENTOR"):
         query = query.where(ResearchProject.leader_id == actor.id)
     return [research_dict(db, r) for r in db.scalars(query.order_by(ResearchProject.updated_at.desc())).all()]
 
@@ -1017,9 +1242,9 @@ def get_research(research_id: str, actor: User = Depends(get_current_user), db: 
     if not research:
         raise HTTPException(404, "Research project not found.")
     require_same_school(actor, research.school_id)
-    if actor.role in {"STUDENT", "STUDENT_LEADER"} and actor.id not in {research.leader_id}:
+    if has_active_role(db, actor, "STUDENT", "STUDENT_LEADER") and actor.id not in {research.leader_id}:
         raise HTTPException(403, "This research workspace is restricted.")
-    if actor.role == "MENTOR" and research.mentor_id != actor.id:
+    if has_active_role(db, actor, "MENTOR") and not has_active_role(db, actor, "ADMIN") and research.mentor_id != actor.id:
         raise HTTPException(403, "This research workspace is not assigned to you.")
     return research_dict(db, research)
 
@@ -1030,7 +1255,7 @@ def update_plan(research_id: str, payload: ResearchPlanUpdate, actor: User = Dep
     if not research:
         raise HTTPException(404, "Research project not found.")
     require_same_school(actor, research.school_id)
-    if actor.id != research.leader_id and actor.role not in {"MENTOR", "ADMIN"}:
+    if actor.id != research.leader_id and not has_active_role(db, actor, "ADMIN"):
         raise HTTPException(403, "Only the leader can edit this plan.")
     latest = db.scalars(select(ResearchPlanVersion).where(ResearchPlanVersion.research_id == research.id).order_by(ResearchPlanVersion.version.desc())).first()
     if latest and not latest.immutable:
@@ -1050,7 +1275,7 @@ def submit_research_review(research_id: str, actor: User = Depends(get_current_u
     if not research:
         raise HTTPException(404, "Research project not found.")
     require_same_school(actor, research.school_id)
-    if actor.id != research.leader_id and actor.role not in {"MENTOR", "ADMIN"}:
+    if actor.id != research.leader_id and not has_active_role(db, actor, "ADMIN"):
         raise HTTPException(403, "Only the leader can submit this plan.")
     latest = db.scalars(select(ResearchPlanVersion).where(ResearchPlanVersion.research_id == research.id).order_by(ResearchPlanVersion.version.desc())).first()
     missing = plan_missing(latest.content if latest else {})
@@ -1077,6 +1302,8 @@ def create_review(payload: dict[str, Any], actor: User = Depends(require_roles("
         raise HTTPException(404, "Reviewable entity not found.")
     require_same_school(actor, entity.school_id)
     if entity_type == "RESEARCH_PROJECT":
+        if has_active_role(db, actor, "MENTOR") and not has_active_role(db, actor, "ADMIN") and entity.mentor_id != actor.id:
+            raise HTTPException(403, "This review is not assigned to you.")
         if decision not in {"APPROVED", "REQUEST_CHANGES"}:
             raise HTTPException(422, "Research decisions must be APPROVED or REQUEST_CHANGES.")
         target = "APPROVED" if decision == "APPROVED" else "CHANGES_REQUESTED"
@@ -1093,7 +1320,8 @@ def create_review(payload: dict[str, Any], actor: User = Depends(require_roles("
             target = "CHANGES_REQUESTED"
         transition(db, actor, entity, "IMPACT_PROJECT", target, IMPACT_TRANSITIONS, reason)
         notify(db, entity.leader_id, "Impact review decision", f"{entity.title}: {decision.replace('_', ' ').lower()}.")
-    db.add(Review(id=new_id(), school_id=actor.school_id, entity_type=entity_type, entity_id=entity_id, reviewer_id=actor.id, decision=decision, reason=reason))
+    latest_version = db.scalars(select(ResearchPlanVersion).where(ResearchPlanVersion.research_id == entity_id).order_by(ResearchPlanVersion.version.desc())).first() if entity_type == "RESEARCH_PROJECT" else None
+    db.add(Review(id=new_id(), school_id=actor.school_id, entity_type=entity_type, entity_id=entity_id, reviewer_id=actor.id, decision=decision, reason=reason, reviewed_version=latest_version.version if latest_version else None))
     audit(db, actor, "REVIEW_DECISION", entity_type, entity_id, {"decision": decision})
     db.commit()
     return {"entity_type": entity_type, "entity_id": entity_id, "decision": decision, "status": entity.status}
@@ -1128,7 +1356,7 @@ def add_question(survey_id: str, payload: SurveyQuestionCreate, actor: User = De
     if not survey:
         raise HTTPException(404, "Survey not found.")
     require_same_school(actor, survey.school_id)
-    if actor.id != survey.created_by and actor.role not in {"MENTOR", "ADMIN"}:
+    if actor.id != survey.created_by and not has_active_role(db, actor, "MENTOR", "ADMIN"):
         raise HTTPException(403, "Only the survey team can edit this survey.")
     if survey.status != "DRAFT":
         raise HTTPException(409, "Approved or open survey versions are immutable.")
@@ -1240,9 +1468,9 @@ def create_impact(payload: ImpactCreate, actor: User = Depends(require_roles("ST
 @app.get(f"{API}/impact-projects")
 def list_impacts(actor: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[dict[str, Any]]:
     query = select(ImpactProject).where(ImpactProject.school_id == actor.school_id)
-    if actor.role == "MENTOR":
+    if has_active_role(db, actor, "MENTOR") and not has_active_role(db, actor, "ADMIN"):
         query = query.where(ImpactProject.mentor_id == actor.id)
-    elif actor.role in {"STUDENT", "STUDENT_LEADER"}:
+    elif has_active_role(db, actor, "STUDENT", "STUDENT_LEADER"):
         query = query.where(ImpactProject.leader_id == actor.id)
     return [impact_dict(db, p) for p in db.scalars(query.order_by(ImpactProject.updated_at.desc())).all()]
 
@@ -1253,9 +1481,9 @@ def get_impact(project_id: str, actor: User = Depends(get_current_user), db: Ses
     if not project:
         raise HTTPException(404, "Impact project not found.")
     require_same_school(actor, project.school_id)
-    if actor.role in {"STUDENT", "STUDENT_LEADER"} and actor.id != project.leader_id:
+    if has_active_role(db, actor, "STUDENT", "STUDENT_LEADER") and not has_active_role(db, actor, "MENTOR", "ADMIN") and actor.id != project.leader_id:
         raise HTTPException(403, "This impact project is restricted.")
-    if actor.role == "MENTOR" and project.mentor_id != actor.id:
+    if has_active_role(db, actor, "MENTOR") and not has_active_role(db, actor, "ADMIN") and project.mentor_id != actor.id:
         raise HTTPException(403, "This impact project is not assigned to you.")
     return impact_dict(db, project)
 
@@ -1266,7 +1494,7 @@ def update_impact(project_id: str, payload: ImpactUpdate, actor: User = Depends(
     if not project:
         raise HTTPException(404, "Impact project not found.")
     require_same_school(actor, project.school_id)
-    if actor.id != project.leader_id and actor.role not in {"MENTOR", "ADMIN"}:
+    if actor.id != project.leader_id and not has_active_role(db, actor, "ADMIN") and not (has_active_role(db, actor, "MENTOR") and project.mentor_id == actor.id):
         raise HTTPException(403, "Only the project team can edit the proposal.")
     for key, value in payload.model_dump(exclude_none=True).items():
         setattr(project, key, value)
@@ -1281,7 +1509,7 @@ def submit_impact_review(project_id: str, actor: User = Depends(get_current_user
     if not project:
         raise HTTPException(404, "Impact project not found.")
     require_same_school(actor, project.school_id)
-    if actor.id != project.leader_id and actor.role not in {"MENTOR", "ADMIN"}:
+    if actor.id != project.leader_id and not has_active_role(db, actor, "ADMIN"):
         raise HTTPException(403, "Only the project leader can submit this proposal.")
     missing = [name for name in ["target_users", "intervention", "theory_of_change", "risks", "resources"] if not getattr(project, name).strip()]
     primary = db.scalar(select(Metric).where(Metric.project_id == project.id, Metric.is_primary.is_(True), Metric.active.is_(True)))
@@ -1299,7 +1527,7 @@ def add_metric(project_id: str, payload: MetricCreate, actor: User = Depends(get
     if not project:
         raise HTTPException(404, "Impact project not found.")
     require_same_school(actor, project.school_id)
-    if actor.id != project.leader_id and actor.role not in {"MENTOR", "ADMIN"}:
+    if actor.id != project.leader_id and not has_active_role(db, actor, "ADMIN") and not (has_active_role(db, actor, "MENTOR") and project.mentor_id == actor.id):
         raise HTTPException(403, "Only the project team can add metrics.")
     active_metrics = db.scalars(select(Metric).where(Metric.project_id == project.id, Metric.active.is_(True))).all()
     if payload.is_primary and any(m.is_primary for m in active_metrics):
@@ -1320,7 +1548,7 @@ def add_observation(metric_id: str, payload: ObservationCreate, actor: User = De
         raise HTTPException(404, "Metric not found.")
     project = db.get(ImpactProject, metric.project_id)
     require_same_school(actor, project.school_id)
-    if actor.id != project.leader_id and actor.role not in {"MENTOR", "ADMIN"}:
+    if actor.id != project.leader_id and not has_active_role(db, actor, "ADMIN") and not (has_active_role(db, actor, "MENTOR") and project.mentor_id == actor.id):
         raise HTTPException(403, "Only the project team can record observations.")
     if payload.phase in {"POST", "DURING", "FOLLOW_UP"} and project.status not in {"ACTIVE", "PAUSED", "COMPLETED", "IMPACT_REVIEW", "PUBLISHED"}:
         raise HTTPException(409, "Record a baseline before during/post observations.")
@@ -1337,7 +1565,7 @@ def activate_impact(project_id: str, actor: User = Depends(get_current_user), db
     if not project:
         raise HTTPException(404, "Impact project not found.")
     require_same_school(actor, project.school_id)
-    if actor.id != project.leader_id and actor.role not in {"MENTOR", "ADMIN"}:
+    if actor.id != project.leader_id and not has_active_role(db, actor, "ADMIN") and not (has_active_role(db, actor, "MENTOR") and project.mentor_id == actor.id):
         raise HTTPException(403, "Only an authorized project member can activate the project.")
     primary = db.scalar(select(Metric).where(Metric.project_id == project.id, Metric.is_primary.is_(True), Metric.active.is_(True)))
     baseline = db.scalar(select(Observation).where(Observation.project_id == project.id, Observation.metric_id == (primary.id if primary else "none"), Observation.phase == "BASELINE")) if primary else None
@@ -1355,7 +1583,7 @@ def get_impact_report(project_id: str, actor: User = Depends(get_current_user), 
     if not project:
         raise HTTPException(404, "Impact project not found.")
     require_same_school(actor, project.school_id)
-    if actor.role in {"STUDENT", "STUDENT_LEADER"} and actor.id != project.leader_id:
+    if has_active_role(db, actor, "STUDENT", "STUDENT_LEADER") and not has_active_role(db, actor, "MENTOR", "ADMIN") and actor.id != project.leader_id:
         raise HTTPException(403, "This report is restricted.")
     current = db.scalars(select(ImpactReport).where(ImpactReport.project_id == project.id).order_by(ImpactReport.version.desc())).first()
     if not current:
@@ -1372,7 +1600,7 @@ def update_impact_report(project_id: str, payload: ReportUpdate, actor: User = D
     if not project:
         raise HTTPException(404, "Impact project not found.")
     require_same_school(actor, project.school_id)
-    if actor.id != project.leader_id and actor.role not in {"MENTOR", "ADMIN"}:
+    if actor.id != project.leader_id and not has_active_role(db, actor, "ADMIN") and not (has_active_role(db, actor, "MENTOR") and project.mentor_id == actor.id):
         raise HTTPException(403, "Only the project team can edit the report.")
     current = db.scalars(select(ImpactReport).where(ImpactReport.project_id == project.id).order_by(ImpactReport.version.desc())).first()
     if current and not current.immutable:
@@ -1402,7 +1630,35 @@ def submit_impact_report(project_id: str, actor: User = Depends(get_current_user
     return impact_dict(db, project)
 
 
+@app.get(f"{API}/tasks/mine")
+@app.get(f"{API}/tasks")
+def list_my_tasks(status_filter: str = "", project_id: str = "", actor: User = Depends(require_permissions("task.read_assigned")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    query = select(ProjectTask).join(ImpactProject, ImpactProject.id == ProjectTask.project_id).where(ImpactProject.school_id == actor.school_id, ProjectTask.owner_id == actor.id)
+    if status_filter.strip():
+        query = query.where(ProjectTask.status == status_filter.upper())
+    if project_id.strip():
+        query = query.where(ProjectTask.project_id == project_id)
+    tasks = db.scalars(query.order_by(ProjectTask.due_date, ProjectTask.title)).all()
+    return {"items": [{"id": task.id, "title": task.title, "status": task.status, "priority": task.priority, "due_date": task.due_date, "owner_id": task.owner_id, "project_id": task.project_id, "href": f"/app/projects/{task.project_id}"} for task in tasks]}
+
+
+@app.patch(f"{API}/tasks/{{task_id}}", dependencies=[Depends(require_csrf)])
+def update_task(task_id: str, payload: TaskUpdate, actor: User = Depends(require_permissions("task.update_assigned")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    task = db.get(ProjectTask, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found.")
+    project = db.get(ImpactProject, task.project_id)
+    if not project or project.school_id != actor.school_id or task.owner_id != actor.id:
+        raise HTTPException(404, "Task not found.")
+    previous = task.status
+    task.status = payload.status
+    audit(db, actor, "TASK_STATUS_UPDATED", "PROJECT_TASK", task.id, {"from": previous, "to": task.status})
+    db.commit()
+    return {"id": task.id, "title": task.title, "status": task.status, "priority": task.priority, "due_date": task.due_date, "owner_id": task.owner_id, "project_id": task.project_id, "href": f"/app/projects/{task.project_id}"}
+
+
 @app.get(f"{API}/mentor/attention")
+@app.get(f"{API}/mentor/reviews")
 def mentor_attention(actor: User = Depends(require_roles("MENTOR", "ADMIN")), db: Session = Depends(get_db)) -> dict[str, Any]:
     research = db.scalars(select(ResearchProject).where(ResearchProject.school_id == actor.school_id, ResearchProject.mentor_id == actor.id, ResearchProject.status == "MENTOR_REVIEW")).all()
     projects = db.scalars(select(ImpactProject).where(ImpactProject.school_id == actor.school_id, ImpactProject.mentor_id == actor.id)).all()

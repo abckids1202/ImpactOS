@@ -76,6 +76,11 @@ class OfficialUpdateCreate(BaseModel):
     message: str = Field(min_length=3)
 
 
+class PriorityRequest(BaseModel):
+    priority: Literal["LOW", "MEDIUM", "HIGH", "URGENT"]
+    rationale: str = Field(min_length=3, max_length=1000)
+
+
 class ResearchCreate(BaseModel):
     cluster_id: str
     title: str = Field(min_length=5, max_length=240)
@@ -181,3 +186,7 @@ class PasswordResetRequest(BaseModel):
 
 class RoleAssignmentRequest(BaseModel):
     roles: list[str] = Field(min_length=1)
+
+
+class TaskUpdate(BaseModel):
+    status: Literal["TODO", "IN_PROGRESS", "BLOCKED", "COMPLETED"]
