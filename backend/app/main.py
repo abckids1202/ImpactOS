@@ -1,19 +1,22 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import io
 import os
 import re
 import secrets
+import time
+from collections import defaultdict, deque
+from threading import Lock
 from datetime import datetime, timedelta
 from statistics import mean, median
 from typing import Any
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -21,6 +24,7 @@ from sqlalchemy.orm import Session
 from .db import SessionLocal, get_db, init_db
 from .models import (
     AuditLog,
+    AuthSession,
     Evidence,
     ImpactProject,
     ImpactReport,
@@ -34,9 +38,13 @@ from .models import (
     PublicImpactStory,
     ProjectTask,
     Invitation,
+    InvitationRole,
+    Membership,
     PasswordResetToken,
     ResearchPlanVersion,
     ResearchProject,
+    Role,
+    RoleAssignment,
     Review,
     School,
     SchoolSetting,
@@ -65,8 +73,10 @@ from .schemas import (
     ReportUpdate,
     SignalCreate,
     ActivationEmailRequest,
+    AuthMeResponse,
     PasswordForgotRequest,
     PasswordResetRequest,
+    RoleAssignmentRequest,
     SurveyCreate,
     SurveyQuestionCreate,
     SurveyResponseCreate,
@@ -75,11 +85,20 @@ from .schemas import (
 from .security import (
     CSRF_COOKIE,
     SESSION_COOKIE,
+    active_permissions,
+    active_role_codes,
     create_session,
     get_current_user,
     hash_password,
+    normalize_role,
+    password_needs_upgrade,
     require_csrf,
     require_roles,
+    revoke_all_sessions,
+    revoke_session,
+    session_cookie_options,
+    token_hash as secure_token_hash,
+    validate_security_config,
     verify_password,
 )
 
@@ -93,8 +112,49 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def request_context(request: Request, call_next):
+    request.state.request_id = f"req_{uuid4().hex}"
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request.state.request_id
+    return response
+
+
+def _error_payload(request: Request, code: str, message: str, field_errors: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {"error": {"code": code, "message": message, "field_errors": field_errors or {}, "request_id": getattr(request.state, "request_id", f"req_{uuid4().hex}")}}
+
+
+@app.exception_handler(HTTPException)
+async def http_error_handler(request: Request, exc: HTTPException):
+    detail = exc.detail if isinstance(exc.detail, dict) else {}
+    code = str(detail.get("code", "INTERNAL_ERROR" if exc.status_code >= 500 else "REQUEST_FAILED"))
+    message = str(detail.get("message", exc.detail if isinstance(exc.detail, str) else "The request could not be completed."))
+    return JSONResponse(status_code=exc.status_code, content={**_error_payload(request, code, message, detail.get("field_errors")), "detail": exc.detail}, headers={"X-Request-ID": getattr(request.state, "request_id", "")})
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    field_errors = {".".join(str(part) for part in error.get("loc", [])[1:]): error.get("msg", "Invalid value") for error in exc.errors()}
+    payload = _error_payload(request, "VALIDATION_ERROR", "Please correct the highlighted fields.", field_errors)
+    return JSONResponse(status_code=422, content={**payload, "detail": payload["error"]}, headers={"X-Request-ID": getattr(request.state, "request_id", "")})
+
 API = "/api/v1"
 DEMO_PASSWORD = os.getenv("DEMO_PASSWORD", "demo1234")
+_RATE_LIMITS: dict[str, deque[float]] = defaultdict(deque)
+_RATE_LIMIT_LOCK = Lock()
+
+
+def enforce_rate_limit(request: Request, bucket: str, limit: int = 8, window_seconds: int = 300) -> None:
+    key = f"{bucket}:{request.client.host if request.client else 'unknown'}"
+    now = time.monotonic()
+    with _RATE_LIMIT_LOCK:
+        events = _RATE_LIMITS[key]
+        while events and now - events[0] > window_seconds:
+            events.popleft()
+        if len(events) >= limit:
+            raise HTTPException(status_code=429, detail={"code": "RATE_LIMITED", "message": "Too many attempts. Please wait and try again."})
+        events.append(now)
 
 
 def app_mode() -> str:
@@ -103,10 +163,6 @@ def app_mode() -> str:
 
 def demo_access_allowed() -> bool:
     return app_mode() == "DEMO" and os.getenv("ENVIRONMENT", "development").lower() not in {"production", "prod"}
-
-
-def token_hash(token: str) -> str:
-    return hashlib.sha256(token.encode()).hexdigest()
 
 
 PUBLIC_FAQ = [
@@ -156,18 +212,67 @@ def user_dict(user: User) -> dict[str, Any]:
     return UserRead.model_validate(user).model_dump()
 
 
-def audit(db: Session, actor: User | None, action: str, entity_type: str, entity_id: str | None, metadata: dict[str, Any] | None = None) -> None:
-    if not actor:
-        return
+ROLE_DETAILS = {
+    "STUDENT_CONTRIBUTOR": ("Student contributor", "Reports concerns and contributes evidence."),
+    "STUDENT_PROJECT_LEADER": ("Student project leader", "Leads approved research and intervention work."),
+    "MENTOR": ("Mentor", "Reviews student plans and decisions."),
+    "OSIS_REVIEWER": ("OSIS reviewer", "Reviews non-sensitive school-wide priorities."),
+    "MODERATOR": ("Moderator", "Reviews reports, safety, visibility, and merging."),
+    "ADMINISTRATOR": ("Administrator", "Manages users, roles, configuration, and audit records."),
+}
+
+
+def ensure_identity_records(db: Session, user: User, role_codes: list[str] | None = None, assigned_by: str | None = None) -> Membership:
+    membership = db.scalar(select(Membership).where(Membership.user_id == user.id, Membership.school_id == user.school_id))
+    if not membership:
+        membership = Membership(id=new_id(), user_id=user.id, school_id=user.school_id, status="ACTIVE")
+        db.add(membership)
+        db.flush()
+    codes = role_codes or [normalize_role(user.role)]
+    for code in codes:
+        canonical = normalize_role(code)
+        role = db.scalar(select(Role).where(Role.code == canonical))
+        if not role:
+            name, description = ROLE_DETAILS.get(canonical, (canonical.replace("_", " ").title(), ""))
+            role = Role(id=new_id(), code=canonical, name=name, description=description)
+            db.add(role)
+            db.flush()
+        assignment = db.scalar(select(RoleAssignment).where(RoleAssignment.membership_id == membership.id, RoleAssignment.role_id == role.id))
+        if not assignment:
+            db.add(RoleAssignment(id=new_id(), membership_id=membership.id, role_id=role.id, assigned_by=assigned_by))
+        elif assignment.revoked_at:
+            assignment.revoked_at = None
+    return membership
+
+
+def auth_me_dict(db: Session, user: User) -> dict[str, Any]:
+    membership = ensure_identity_records(db, user)
+    school = db.get(School, user.school_id)
+    roles = active_role_codes(db, user)
+    return {
+        "user": {"id": user.id, "email": user.email, "display_name": user.display_name, "status": getattr(user, "status", "ACTIVE")},
+        "memberships": [{
+            "id": membership.id,
+            "school": {"id": school.id if school else user.school_id, "name": school.name if school else "Sekolah Pilar Indonesia", "slug": school.slug if school else "pilar-impact-lab"},
+            "roles": roles,
+            "permissions": active_permissions(db, user),
+            "status": membership.status,
+        }],
+    }
+
+
+def audit(db: Session, actor: User | None, action: str, entity_type: str, entity_id: str | None, metadata: dict[str, Any] | None = None, request: Request | None = None, school_id: str | None = None) -> None:
     db.add(
         AuditLog(
             id=new_id(),
-            school_id=actor.school_id,
-            actor_id=actor.id,
+            school_id=actor.school_id if actor else (school_id or "school-pilar"),
+            actor_id=actor.id if actor else None,
+            actor_user_id=actor.id if actor else None,
             action=action,
             entity_type=entity_type,
             entity_id=entity_id,
             metadata_safe=metadata or {},
+            request_id=getattr(request.state, "request_id", None) if request else None,
         )
     )
 
@@ -328,11 +433,13 @@ def impact_dict(db: Session, project: ImpactProject) -> dict[str, Any]:
 
 
 def seed_demo() -> None:
+    if os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "development")).lower() in {"production", "prod"}:
+        raise RuntimeError("Development seed data is disabled in production.")
     db = SessionLocal()
     try:
         school = db.get(School, "school-pilar")
         if not school:
-            school = School(id="school-pilar", name="Sekolah Pilar Indonesia", slug="pilar-impact-lab", mode=os.getenv("APP_MODE", "DEMO"), language="en")
+            school = School(id="school-pilar", name="Sekolah Pilar Indonesia", slug="pilar-impact-lab", mode=os.getenv("APP_MODE", "DEMO"), language="en", is_active=True)
             db.add(school)
             db.add(SchoolSetting(school_id=school.id, settings={"school_name": school.name, "urgent_help_notice": "ImpactOS is not an emergency channel. Contact the school's designated safeguarding team for urgent help.", "private_report_owner_role": "ADMIN", "allowed_categories": ["ACADEMICS", "CAMPUS", "WELLBEING", "ENVIRONMENT"], "retention_reference": "To be confirmed with Pilar", "publication_policy": "School-only during closed alpha"}))
         demo_users = [
@@ -342,6 +449,7 @@ def seed_demo() -> None:
             ("user-osis", "osis@demo.local", "Dimas OSIS Reviewer", "OSIS"),
             ("user-moderator", "moderator@demo.local", "Nadia Moderator", "MODERATOR"),
             ("user-admin", "admin@demo.local", "Pilar Administrator", "ADMIN"),
+            ("user-multi", "multi@demo.local", "Sam Multi Role", "STUDENT_LEADER"),
         ]
         users: dict[str, User] = {}
         for uid, email, name, role in demo_users:
@@ -349,8 +457,30 @@ def seed_demo() -> None:
             if not user:
                 user = User(id=uid, school_id=school.id, email=email, display_name=name, role=role, password_hash=hash_password(DEMO_PASSWORD), active=True)
                 db.add(user)
+            if getattr(user, "status", None) is None:
+                user.status = "ACTIVE"
+            if not user.active:
+                user.active = True
             users[email] = user
         db.flush()
+        for user in users.values():
+            roles = ["STUDENT_PROJECT_LEADER", "MENTOR"] if user.email == "multi@demo.local" else [normalize_role(user.role)]
+            ensure_identity_records(db, user, roles)
+        db.flush()
+        admin = users["admin@demo.local"]
+        invitation_seed = [
+            ("invitation-pending", "pending@demo.local", "PENDING", datetime.utcnow() + timedelta(days=7), "demo-pending-invitation-token"),
+            ("invitation-expired", "expired@demo.local", "EXPIRED", datetime.utcnow() - timedelta(days=1), "demo-expired-invitation-token"),
+            ("invitation-revoked", "revoked@demo.local", "REVOKED", datetime.utcnow() + timedelta(days=7), "demo-revoked-invitation-token"),
+        ]
+        for invitation_id, email, invitation_status, expires_at, raw_token in invitation_seed:
+            if not db.get(Invitation, invitation_id):
+                invitation = Invitation(id=invitation_id, school_id=school.id, email=email, role="STUDENT", token_hash=secure_token_hash(raw_token), expires_at=expires_at, status=invitation_status, revoked_at=datetime.utcnow() if invitation_status == "REVOKED" else None, created_by=admin.id, invited_by=admin.id)
+                db.add(invitation)
+                db.flush()
+                role = db.scalar(select(Role).where(Role.code == "STUDENT_CONTRIBUTOR"))
+                if role:
+                    db.add(InvitationRole(invitation_id=invitation.id, role_id=role.id))
         clusters = [
             ("cluster-assessment", "Assessment Workload Concentration", "Major assignments are often due within the same three-day period across Grade 10 classes.", "ACADEMICS", "Several Grade 10 classes", "VALIDATED"),
             ("cluster-canteen", "Canteen Queue Congestion", "Students report long queues during the main lunch window.", "CAMPUS", "Main canteen", "GATHERING_EVIDENCE"),
@@ -396,13 +526,22 @@ def seed_demo() -> None:
 
 @app.on_event("startup")
 def on_startup() -> None:
+    validate_security_config()
     init_db()
-    seed_demo()
+    seed_enabled = os.getenv("DEVELOPMENT_SEED_ENABLED", "true" if app_mode() == "DEMO" else "false").lower() == "true"
+    if seed_enabled and os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "development")).lower() not in {"production", "prod"}:
+        seed_demo()
 
 
 @app.get(f"{API}/health")
 def health() -> dict[str, Any]:
     return {"status": "ok", "service": "impactos-api", "mode": app_mode(), "synthetic_data": app_mode() == "DEMO"}
+
+
+@app.get(f"{API}/ready")
+def ready(db: Session = Depends(get_db)) -> dict[str, Any]:
+    db.execute(select(func.count()).select_from(School))
+    return {"status": "ready", "database": "ok"}
 
 
 @app.get(f"{API}/public/site")
@@ -447,26 +586,42 @@ def public_impact_story(slug: str, db: Session = Depends(get_db)) -> dict[str, A
 
 
 @app.post(f"{API}/auth/login")
-def login(payload: LoginRequest, response: Response, db: Session = Depends(get_db)) -> dict[str, Any]:
-    user = db.scalar(select(User).where(User.email == payload.email.lower().strip()))
+def login(payload: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)) -> dict[str, Any]:
+    enforce_rate_limit(request, "login", limit=10, window_seconds=300)
+    normalized_email = payload.email.lower().strip()
+    user = db.scalar(select(User).where(User.email == normalized_email))
     if user and user.email.endswith("@demo.local") and not demo_access_allowed():
         user = None
-    if not user or not user.active or not verify_password(payload.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid email or password.")
-    session, csrf = create_session(user)
-    response.set_cookie(SESSION_COOKIE, session, httponly=True, samesite="lax", secure=False, max_age=60 * 60 * 12)
-    response.set_cookie(CSRF_COOKIE, csrf, httponly=False, samesite="lax", secure=False, max_age=60 * 60 * 12)
-    audit(db, user, "LOGIN", "USER", user.id)
+    valid = user and user.active and getattr(user, "status", "ACTIVE") == "ACTIVE" and verify_password(payload.password, user.password_hash)
+    if not valid:
+        audit(db, user, "AUTH_LOGIN_FAILED", "USER", user.id if user else None, {"reason": "invalid_credentials"}, request=request)
+        db.commit()
+        raise HTTPException(status_code=401, detail={"code": "INVALID_CREDENTIALS", "message": "The email or password is incorrect."})
+    if password_needs_upgrade(user.password_hash):
+        user.password_hash = hash_password(payload.password)
+    user.status = "ACTIVE"
+    user.last_login_at = datetime.utcnow()
+    ensure_identity_records(db, user)
+    session, csrf = create_session(user, db, request)
+    audit(db, user, "AUTH_LOGIN_SUCCEEDED", "USER", user.id, request=request)
     db.commit()
-    return {"user": user_dict(user), "mode": app_mode(), "synthetic_data": app_mode() == "DEMO"}
+    summary = user_dict(user)
+    summary.update({"roles": active_role_codes(db, user), "permissions": active_permissions(db, user)})
+    response.set_cookie(SESSION_COOKIE, session, **session_cookie_options())
+    response.set_cookie(CSRF_COOKIE, csrf, httponly=False, **{key: value for key, value in session_cookie_options().items() if key != "httponly"})
+    return {"user": summary, "mode": app_mode(), "synthetic_data": app_mode() == "DEMO"}
 
 
 @app.post(f"{API}/auth/logout", dependencies=[Depends(require_csrf)])
-def logout(response: Response, actor: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, str]:
-    audit(db, actor, "LOGOUT", "USER", actor.id)
+def logout(request: Request, response: Response, actor: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, str]:
+    auth_session = getattr(request.state, "auth_session", None)
+    if auth_session:
+        revoke_session(auth_session)
+        audit(db, actor, "AUTH_SESSION_REVOKED", "SESSION", auth_session.id, {"reason": "logout"}, request=request)
+    audit(db, actor, "AUTH_LOGOUT", "USER", actor.id, request=request)
     db.commit()
-    response.delete_cookie(SESSION_COOKIE)
-    response.delete_cookie(CSRF_COOKIE)
+    response.delete_cookie(SESSION_COOKIE, secure=session_cookie_options()["secure"], httponly=True, samesite="lax")
+    response.delete_cookie(CSRF_COOKIE, secure=session_cookie_options()["secure"], httponly=False, samesite="lax")
     return {"status": "logged_out"}
 
 
@@ -475,15 +630,22 @@ def me(actor: User = Depends(get_current_user)) -> User:
     return actor
 
 
+@app.get(f"{API}/auth/me", response_model=AuthMeResponse)
+def auth_me(db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> dict[str, Any]:
+    payload = auth_me_dict(db, actor)
+    db.commit()
+    return payload
+
+
 @app.get(f"{API}/auth/session")
 def auth_session(actor: User = Depends(get_current_user)) -> dict[str, Any]:
     return {"authenticated": True, "user": user_dict(actor)}
 
 
 def invitation_state(invitation: Invitation) -> str:
-    if invitation.revoked_at:
+    if invitation.revoked_at or getattr(invitation, "status", "PENDING") == "REVOKED":
         return "REVOKED"
-    if invitation.used_at:
+    if invitation.used_at or getattr(invitation, "status", "PENDING") == "USED":
         return "USED"
     if invitation.expires_at <= datetime.utcnow():
         return "EXPIRED"
@@ -499,69 +661,94 @@ def mask_email(email: str) -> str:
     return f"{masked}@{domain}"
 
 
+@app.get(f"{API}/auth/invitations/verify")
 @app.get(f"{API}/invitations/{{token}}/preview")
 def preview_invitation(token: str, db: Session = Depends(get_db)) -> dict[str, Any]:
-    invitation = db.scalar(select(Invitation).where(Invitation.token_hash == token_hash(token)))
+    invitation = db.scalar(select(Invitation).where(Invitation.token_hash == secure_token_hash(token)))
     if not invitation:
-        raise HTTPException(404, "This invitation is unavailable or has expired.")
+        raise HTTPException(404, detail={"code": "INVITATION_INVALID", "message": "This invitation is not valid."})
     state = invitation_state(invitation)
     if state != "ACTIVE":
-        raise HTTPException(410, "This invitation is unavailable or has expired.")
+        code = {"EXPIRED": "INVITATION_EXPIRED", "USED": "INVITATION_USED", "REVOKED": "INVITATION_REVOKED"}.get(state, "INVITATION_INVALID")
+        raise HTTPException(410, detail={"code": code, "message": "This invitation is no longer available."})
     school = db.get(School, invitation.school_id)
-    return {"email": mask_email(invitation.email), "role": invitation.role, "school_name": school.name if school else "Sekolah Pilar Indonesia", "expires_at": dt(invitation.expires_at)}
+    role_rows = db.execute(select(Role.code).join(InvitationRole, InvitationRole.role_id == Role.id).where(InvitationRole.invitation_id == invitation.id)).all()
+    roles = [row[0] for row in role_rows] or [normalize_role(invitation.role)]
+    return {"email": invitation.email, "role": invitation.role, "roles": roles, "school_name": school.name if school else "Sekolah Pilar Indonesia", "expires_at": dt(invitation.expires_at), "status": state, "state": state}
 
 
+@app.post(f"{API}/auth/activate")
 @app.post(f"{API}/invitations/{{token}}/accept")
-def accept_invitation(token: str, payload: InvitationAccept, response: Response, db: Session = Depends(get_db)) -> dict[str, Any]:
-    invitation = db.scalar(select(Invitation).where(Invitation.token_hash == token_hash(token)))
+def accept_invitation(token: str, payload: InvitationAccept, request: Request, response: Response, db: Session = Depends(get_db)) -> dict[str, Any]:
+    enforce_rate_limit(request, "activation", limit=8, window_seconds=900)
+    invitation = db.scalar(select(Invitation).where(Invitation.token_hash == secure_token_hash(token)))
     if not invitation or invitation_state(invitation) != "ACTIVE":
-        raise HTTPException(410, "This invitation is unavailable or has expired.")
-    existing = db.scalar(select(User).where(User.email == invitation.email))
-    if existing and existing.active:
-        raise HTTPException(409, "This member account already exists. Please sign in.")
-    user = existing or User(id=new_id(), school_id=invitation.school_id, email=invitation.email, display_name=payload.display_name.strip(), role=invitation.role, password_hash=hash_password(payload.password), active=True)
-    if existing:
-        user.display_name = payload.display_name.strip()
-        user.role = invitation.role
-        user.password_hash = hash_password(payload.password)
-        user.active = True
+        raise HTTPException(410, detail={"code": "INVITATION_INVALID", "message": "This invitation is no longer available."})
+    if payload.email and payload.email.lower().strip() != invitation.email.lower().strip():
+        raise HTTPException(400, detail={"code": "INVITATION_EMAIL_MISMATCH", "message": "Use the SPI email assigned to this invitation."})
+    if payload.password_confirmation is not None and payload.password_confirmation != payload.password:
+        raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "Passwords do not match.", "field_errors": {"password_confirmation": "Passwords do not match."}})
+    if not payload.accepted_rules:
+        raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "You must accept the platform rules to activate an account."})
+    existing = db.scalar(select(User).where(User.email == invitation.email.lower().strip()))
+    if existing and existing.active and getattr(existing, "status", "ACTIVE") == "ACTIVE":
+        raise HTTPException(409, detail={"code": "ACCOUNT_EXISTS", "message": "This member account already exists. Please sign in."})
+    role_rows = db.execute(select(Role.code).join(InvitationRole, InvitationRole.role_id == Role.id).where(InvitationRole.invitation_id == invitation.id)).all()
+    role_codes = [row[0] for row in role_rows] or [normalize_role(invitation.role)]
+    legacy_role = {"STUDENT_CONTRIBUTOR": "STUDENT", "STUDENT_PROJECT_LEADER": "STUDENT_LEADER", "OSIS_REVIEWER": "OSIS", "ADMINISTRATOR": "ADMIN"}.get(role_codes[0], role_codes[0])
+    user = existing or User(id=new_id(), school_id=invitation.school_id, email=invitation.email.lower().strip(), display_name=payload.display_name.strip(), role=legacy_role, password_hash=hash_password(payload.password), active=True)
+    user.display_name = payload.display_name.strip()
+    user.role = legacy_role
+    user.password_hash = hash_password(payload.password)
+    user.active = True
+    user.status = "ACTIVE"
     db.add(user)
     db.flush()
+    ensure_identity_records(db, user, role_codes)
     invitation.used_at = datetime.utcnow()
-    audit(db, user, "INVITATION_ACCEPTED", "INVITATION", invitation.id, {"role": user.role})
+    invitation.used_by = user.id
+    invitation.status = "USED"
+    audit(db, user, "ACCOUNT_ACTIVATED", "USER", user.id, {"roles": role_codes}, request=request)
+    audit(db, user, "INVITATION_USED", "INVITATION", invitation.id, {"roles": role_codes}, request=request)
+    session, csrf = create_session(user, db, request)
     db.commit()
-    session, csrf = create_session(user)
-    response.set_cookie(SESSION_COOKIE, session, httponly=True, samesite="lax", secure=False, max_age=60 * 60 * 12)
-    response.set_cookie(CSRF_COOKIE, csrf, httponly=False, samesite="lax", secure=False, max_age=60 * 60 * 12)
-    return {"user": user_dict(user), "mode": app_mode()}
+    response.set_cookie(SESSION_COOKIE, session, **session_cookie_options())
+    response.set_cookie(CSRF_COOKIE, csrf, httponly=False, **{key: value for key, value in session_cookie_options().items() if key != "httponly"})
+    summary = user_dict(user)
+    summary.update({"roles": role_codes, "permissions": active_permissions(db, user)})
+    return {"user": summary, "mode": app_mode()}
 
 
 @app.post(f"{API}/activation/request-email")
-def request_email_activation(payload: ActivationEmailRequest, db: Session = Depends(get_db)) -> dict[str, str]:
+def request_email_activation(payload: ActivationEmailRequest, request: Request, db: Session = Depends(get_db)) -> dict[str, str]:
     # The closed alpha intentionally does not pretend to send mail. The response
     # is neutral to avoid account/domain enumeration.
+    enforce_rate_limit(request, "activation-email", limit=5, window_seconds=900)
     normalized = payload.email.strip().lower()
     configured_domains = [d.strip().lower() for d in os.getenv("APPROVED_EMAIL_DOMAINS", "").split(",") if d.strip()]
     if configured_domains and normalized.rsplit("@", 1)[-1] in configured_domains:
-        audit(db, None, "ACTIVATION_EMAIL_REQUESTED", "ACTIVATION", None)
+        audit(db, None, "ACTIVATION_EMAIL_REQUESTED", "ACTIVATION", None, request=request)
+        db.commit()
     return {"message": "If this address is eligible, activation instructions will be sent by the school. If no school email activation is configured, ask an administrator for an invitation."}
 
 
 @app.post(f"{API}/auth/forgot-password")
-def forgot_password(payload: PasswordForgotRequest, db: Session = Depends(get_db)) -> dict[str, Any]:
+def forgot_password(payload: PasswordForgotRequest, request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
+    enforce_rate_limit(request, "password-recovery", limit=5, window_seconds=900)
     user = db.scalar(select(User).where(User.email == payload.email.strip().lower(), User.active.is_(True)))
     result: dict[str, Any] = {"message": "If the account can use password recovery, instructions will be provided through the configured school channel."}
     if user and app_mode() == "DEMO" and demo_access_allowed():
         raw = secrets.token_urlsafe(32)
-        db.add(PasswordResetToken(id=new_id(), user_id=user.id, token_hash=token_hash(raw), expires_at=datetime.utcnow() + timedelta(minutes=30)))
+        db.add(PasswordResetToken(id=new_id(), user_id=user.id, token_hash=secure_token_hash(raw), expires_at=datetime.utcnow() + timedelta(minutes=30)))
         db.commit()
         result["development_reset_token"] = raw
     return result
 
 
 @app.post(f"{API}/auth/reset-password")
-def reset_password(payload: PasswordResetRequest, db: Session = Depends(get_db)) -> dict[str, str]:
-    reset = db.scalar(select(PasswordResetToken).where(PasswordResetToken.token_hash == token_hash(payload.token)))
+def reset_password(payload: PasswordResetRequest, request: Request, db: Session = Depends(get_db)) -> dict[str, str]:
+    enforce_rate_limit(request, "password-reset", limit=8, window_seconds=900)
+    reset = db.scalar(select(PasswordResetToken).where(PasswordResetToken.token_hash == secure_token_hash(payload.token)))
     if not reset or reset.used_at or reset.expires_at <= datetime.utcnow():
         raise HTTPException(400, "This password reset link is unavailable or has expired.")
     user = db.get(User, reset.user_id)
@@ -1258,6 +1445,95 @@ def audit_logs(actor: User = Depends(require_roles("ADMIN", "MODERATOR")), db: S
     return [{"id": row.id, "actor_id": row.actor_id, "action": row.action, "entity_type": row.entity_type, "entity_id": row.entity_id, "metadata": row.metadata_safe, "created_at": dt(row.created_at)} for row in rows]
 
 
+@app.get(f"{API}/admin/audit")
+def phase_one_audit_logs(actor: User = Depends(require_roles("ADMIN")), db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+    return audit_logs(actor=actor, db=db)
+
+
+def member_summary(db: Session, user: User) -> dict[str, Any]:
+    return {**user_dict(user), "roles": active_role_codes(db, user), "permissions": active_permissions(db, user), "membership_id": db.scalar(select(Membership.id).where(Membership.user_id == user.id, Membership.school_id == user.school_id))}
+
+
+@app.get(f"{API}/admin/members")
+def admin_members(search: str | None = None, status_filter: str | None = None, role_filter: str | None = None, actor: User = Depends(require_roles("ADMIN")), db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+    query = select(User).where(User.school_id == actor.school_id).order_by(User.created_at)
+    if search:
+        term = f"%{search.strip().lower()}%"
+        query = query.where(func.lower(User.email).like(term) | func.lower(User.display_name).like(term))
+    users = db.scalars(query).all()
+    rows = [member_summary(db, user) for user in users]
+    if status_filter:
+        rows = [row for row in rows if row.get("status") == status_filter.upper()]
+    if role_filter:
+        rows = [row for row in rows if normalize_role(role_filter.upper()) in row.get("roles", [])]
+    return rows
+
+
+def find_membership(db: Session, membership_id: str, school_id: str) -> Membership:
+    membership = db.scalar(select(Membership).where(Membership.id == membership_id, Membership.school_id == school_id))
+    if membership:
+        return membership
+    membership = db.scalar(select(Membership).join(User, User.id == Membership.user_id).where(User.id == membership_id, Membership.school_id == school_id))
+    if membership:
+        return membership
+    raise HTTPException(404, detail={"code": "MEMBER_NOT_FOUND", "message": "Member not found."})
+
+
+@app.patch(f"{API}/admin/members/{{membership_id}}/roles", dependencies=[Depends(require_csrf)])
+def update_member_roles(membership_id: str, payload: RoleAssignmentRequest, request: Request, actor: User = Depends(require_roles("ADMIN")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    membership = find_membership(db, membership_id, actor.school_id)
+    desired = {normalize_role(role.upper()) for role in payload.roles}
+    if not desired or not desired.issubset(set(ROLE_DETAILS)):
+        raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "One or more roles are invalid."})
+    current = set(active_role_codes(db, db.get(User, membership.user_id)))
+    if "ADMINISTRATOR" in current and "ADMINISTRATOR" not in desired:
+        remaining = db.scalar(select(func.count()).select_from(User).join(Membership, Membership.user_id == User.id).join(RoleAssignment, RoleAssignment.membership_id == Membership.id).join(Role, Role.id == RoleAssignment.role_id).where(User.school_id == actor.school_id, User.active.is_(True), Role.code == "ADMINISTRATOR", RoleAssignment.revoked_at.is_(None), User.id != membership.user_id)) or 0
+        if remaining < 1:
+            raise HTTPException(409, detail={"code": "FINAL_ADMIN_PROTECTED", "message": "The final active administrator cannot lose administrator access."})
+    target = db.get(User, membership.user_id)
+    ensure_identity_records(db, target, list(desired), actor.id)
+    assignments = db.scalars(select(RoleAssignment).where(RoleAssignment.membership_id == membership.id)).all()
+    for assignment in assignments:
+        role = db.get(Role, assignment.role_id)
+        if role and role.code not in desired and assignment.revoked_at is None:
+            assignment.revoked_at = datetime.utcnow()
+    target.role = {"STUDENT_CONTRIBUTOR": "STUDENT", "STUDENT_PROJECT_LEADER": "STUDENT_LEADER", "OSIS_REVIEWER": "OSIS", "ADMINISTRATOR": "ADMIN"}.get(sorted(desired)[0], sorted(desired)[0])
+    audit(db, actor, "MEMBER_ROLES_UPDATED", "MEMBERSHIP", membership.id, {"roles": sorted(desired)}, request=request)
+    db.commit()
+    return member_summary(db, target)
+
+
+@app.post(f"{API}/admin/members/{{membership_id}}/deactivate", dependencies=[Depends(require_csrf)])
+def deactivate_member(membership_id: str, request: Request, actor: User = Depends(require_roles("ADMIN")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    membership = find_membership(db, membership_id, actor.school_id)
+    target = db.get(User, membership.user_id)
+    if target.id == actor.id:
+        raise HTTPException(409, detail={"code": "SELF_DEACTIVATION_BLOCKED", "message": "You cannot deactivate your own administrator account."})
+    if "ADMINISTRATOR" in active_role_codes(db, target):
+        remaining = db.scalar(select(func.count()).select_from(User).join(Membership, Membership.user_id == User.id).join(RoleAssignment, RoleAssignment.membership_id == Membership.id).join(Role, Role.id == RoleAssignment.role_id).where(User.school_id == actor.school_id, User.active.is_(True), User.id != target.id, Role.code == "ADMINISTRATOR", RoleAssignment.revoked_at.is_(None))) or 0
+        if remaining < 1:
+            raise HTTPException(409, detail={"code": "FINAL_ADMIN_PROTECTED", "message": "The final active administrator cannot be deactivated."})
+    target.active = False
+    target.status = "DEACTIVATED"
+    membership.status = "DEACTIVATED"
+    sessions = revoke_all_sessions(db, target.id)
+    audit(db, actor, "ACCOUNT_DEACTIVATED", "USER", target.id, {"sessions_revoked": sessions}, request=request)
+    db.commit()
+    return member_summary(db, target)
+
+
+@app.post(f"{API}/admin/members/{{membership_id}}/reactivate", dependencies=[Depends(require_csrf)])
+def reactivate_member(membership_id: str, request: Request, actor: User = Depends(require_roles("ADMIN")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    membership = find_membership(db, membership_id, actor.school_id)
+    target = db.get(User, membership.user_id)
+    target.active = True
+    target.status = "ACTIVE"
+    membership.status = "ACTIVE"
+    audit(db, actor, "ACCOUNT_REACTIVATED", "USER", target.id, request=request)
+    db.commit()
+    return member_summary(db, target)
+
+
 @app.get(f"{API}/admin/settings")
 def get_settings(actor: User = Depends(require_roles("ADMIN")), db: Session = Depends(get_db)) -> dict[str, Any]:
     settings = db.get(SchoolSetting, actor.school_id)
@@ -1278,38 +1554,73 @@ def update_settings(payload: dict[str, Any], actor: User = Depends(require_roles
 
 
 @app.post(f"{API}/admin/invitations", dependencies=[Depends(require_csrf)])
-def create_invitation(payload: InvitationCreate, actor: User = Depends(require_roles("ADMIN")), db: Session = Depends(get_db)) -> dict[str, Any]:
+def create_invitation(payload: InvitationCreate, request: Request, actor: User = Depends(require_roles("ADMIN")), db: Session = Depends(get_db)) -> dict[str, Any]:
     email = payload.email.strip().lower()
     if "@" not in email:
-        raise HTTPException(422, "Enter a valid email address.")
+        raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "Enter a valid email address."})
     existing = db.scalar(select(User).where(User.email == email, User.active.is_(True)))
     if existing:
-        raise HTTPException(409, "An active account already exists for this email.")
+        raise HTTPException(409, detail={"code": "ACCOUNT_EXISTS", "message": "An active account already exists for this email."})
+    role_codes = [normalize_role(role.upper()) for role in (payload.roles or [payload.role])]
+    if not role_codes or not set(role_codes).issubset(set(ROLE_DETAILS)):
+        raise HTTPException(422, detail={"code": "VALIDATION_ERROR", "message": "One or more roles are invalid."})
     raw = secrets.token_urlsafe(32)
-    invitation = Invitation(id=new_id(), school_id=actor.school_id, email=email, role=payload.role, token_hash=token_hash(raw), expires_at=datetime.utcnow() + timedelta(days=payload.expires_in_days), created_by=actor.id)
+    invitation = Invitation(id=new_id(), school_id=actor.school_id, email=email, role={"STUDENT_CONTRIBUTOR": "STUDENT", "STUDENT_PROJECT_LEADER": "STUDENT_LEADER", "OSIS_REVIEWER": "OSIS", "ADMINISTRATOR": "ADMIN"}.get(role_codes[0], role_codes[0]), token_hash=secure_token_hash(raw), expires_at=datetime.utcnow() + timedelta(days=payload.expires_in_days), status="PENDING", created_by=actor.id, invited_by=actor.id)
     db.add(invitation)
-    audit(db, actor, "INVITATION_CREATED", "INVITATION", invitation.id, {"role": payload.role})
+    db.flush()
+    for code in role_codes:
+        role = db.scalar(select(Role).where(Role.code == code))
+        if not role:
+            name, description = ROLE_DETAILS[code]
+            role = Role(id=new_id(), code=code, name=name, description=description)
+            db.add(role)
+            db.flush()
+        db.add(InvitationRole(invitation_id=invitation.id, role_id=role.id))
+    audit(db, actor, "INVITATION_CREATED", "INVITATION", invitation.id, {"roles": role_codes}, request=request)
     db.commit()
-    return {"id": invitation.id, "email": invitation.email, "role": invitation.role, "expires_at": dt(invitation.expires_at), "token": raw, "activation_path": f"/invite/{raw}"}
+    return {"id": invitation.id, "email": invitation.email, "role": invitation.role, "roles": role_codes, "expires_at": dt(invitation.expires_at), "token": raw, "activation_path": f"/activate?token={raw}"}
 
 
 @app.get(f"{API}/admin/invitations")
 def list_invitations(actor: User = Depends(require_roles("ADMIN")), db: Session = Depends(get_db)) -> list[dict[str, Any]]:
     rows = db.scalars(select(Invitation).where(Invitation.school_id == actor.school_id).order_by(Invitation.created_at.desc())).all()
-    return [{"id": row.id, "email": row.email, "role": row.role, "state": invitation_state(row), "expires_at": dt(row.expires_at), "created_at": dt(row.created_at)} for row in rows]
+    return [{"id": row.id, "email": row.email, "role": row.role, "roles": [result[0] for result in db.execute(select(Role.code).join(InvitationRole, InvitationRole.role_id == Role.id).where(InvitationRole.invitation_id == row.id)).all()] or [normalize_role(row.role)], "state": invitation_state(row), "expires_at": dt(row.expires_at), "created_at": dt(row.created_at)} for row in rows]
 
 
 @app.post(f"{API}/admin/invitations/{{invitation_id}}/revoke", dependencies=[Depends(require_csrf)])
 def revoke_invitation(invitation_id: str, actor: User = Depends(require_roles("ADMIN")), db: Session = Depends(get_db)) -> dict[str, str]:
     invitation = db.get(Invitation, invitation_id)
     if not invitation or invitation.school_id != actor.school_id:
-        raise HTTPException(404, "Invitation not found.")
+        raise HTTPException(404, detail={"code": "INVITATION_INVALID", "message": "Invitation not found."})
     if invitation_state(invitation) == "USED":
         raise HTTPException(409, "Used invitations cannot be revoked.")
     invitation.revoked_at = datetime.utcnow()
+    invitation.status = "REVOKED"
     audit(db, actor, "INVITATION_REVOKED", "INVITATION", invitation.id)
     db.commit()
     return {"status": "revoked"}
+
+
+@app.post(f"{API}/admin/invitations/{{invitation_id}}/resend", dependencies=[Depends(require_csrf)])
+def resend_invitation(invitation_id: str, request: Request, actor: User = Depends(require_roles("ADMIN")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    old = db.get(Invitation, invitation_id)
+    if not old or old.school_id != actor.school_id:
+        raise HTTPException(404, detail={"code": "INVITATION_INVALID", "message": "Invitation not found."})
+    if invitation_state(old) == "USED":
+        raise HTTPException(409, detail={"code": "INVITATION_USED", "message": "Used invitations cannot be resent."})
+    old.status = "REVOKED"
+    old.revoked_at = datetime.utcnow()
+    raw = secrets.token_urlsafe(32)
+    replacement = Invitation(id=new_id(), school_id=old.school_id, email=old.email, role=old.role, token_hash=secure_token_hash(raw), expires_at=datetime.utcnow() + timedelta(days=7), status="PENDING", created_by=actor.id, invited_by=actor.id)
+    db.add(replacement)
+    db.flush()
+    for role_code in [normalize_role(old.role)]:
+        role = db.scalar(select(Role).where(Role.code == role_code))
+        if role:
+            db.add(InvitationRole(invitation_id=replacement.id, role_id=role.id))
+    audit(db, actor, "INVITATION_CREATED", "INVITATION", replacement.id, {"resend_of": old.id}, request=request)
+    db.commit()
+    return {"id": replacement.id, "email": replacement.email, "token": raw, "activation_path": f"/activate?token={raw}", "expires_at": dt(replacement.expires_at)}
 
 
 @app.post(f"{API}/admin/public-impact-stories", dependencies=[Depends(require_csrf)])

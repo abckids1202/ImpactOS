@@ -1,7 +1,7 @@
 import { FormEvent, ReactNode, useEffect, useState } from "react";
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import { api } from "./api";
-import { ActivatePage, ForgotPasswordPage, InvitePage, MemberLogin, ProtectedRoute, ResetPasswordPage } from "./AuthPages";
+import { ActivatePage, ForgotPasswordPage, InvitePage, MemberLogin, PermissionRoute, ProtectedRoute, ResetPasswordPage, UnauthorizedPage } from "./AuthPages";
 import { HowItWorks, PublicAbout, PublicContact, PublicFaq, PublicHome, PublicImpactDetail, PublicImpactIndex, PublicLayout, PublicSafety } from "./PublicSite";
 import type { Cluster, ImpactProject, Research, User } from "./types";
 
@@ -41,7 +41,8 @@ function App() {
     <Route path="/forgot-password" element={<ForgotPasswordPage />} />
     <Route path="/reset-password/:token" element={<ResetPasswordPage />} />
     <Route path="/verify-email" element={<ActivatePage verificationOnly />} />
-    <Route path="/app/*" element={<ProtectedRoute user={user} checking={checking}>{user ? <Shell user={user} onLogout={() => setUser(null)} /> : null}</ProtectedRoute>} />
+    <Route path="/unauthorized" element={<UnauthorizedPage />} />
+    <Route path="/app/*" element={<ProtectedRoute user={user} checking={checking}>{user ? <PermissionRoute user={user} permission="app.access"><Shell user={user} onLogout={() => setUser(null)} /></PermissionRoute> : null}</ProtectedRoute>} />
     <Route path="/dashboard" element={<Navigate to="/app/dashboard" replace />} />
     <Route path="/problems/*" element={<Navigate to="/app/problems" replace />} />
     <Route path="/research/*" element={<Navigate to="/app/research" replace />} />
@@ -62,15 +63,22 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
   const location = useLocation();
   const [logoutError, setLogoutError] = useState<unknown>(null);
   const demoMode = import.meta.env.DEV && (import.meta.env.VITE_APP_MODE || "DEMO") === "DEMO";
+  const permissions = new Set(user.permissions || []);
   const navItems = [
-    ["/app/dashboard", "Dashboard", true], ["/app/problems", "Problems", true], ["/app/research", "Research", true], ["/app/projects", "Impact projects", true], ["/app/tasks", "My tasks", true],
-    ["/app/mentor", "Mentor review", ["MENTOR", "ADMIN"].includes(user.role)], ["/app/osis", "OSIS workspace", ["OSIS", "ADMIN"].includes(user.role)], ["/app/moderation", "Moderation", ["MODERATOR", "ADMIN"].includes(user.role)], ["/app/admin", "Admin", user.role === "ADMIN"],
+    ["/app/dashboard", "Dashboard", permissions.has("app.access")],
+    ["/app/profile", "My profile", permissions.has("profile.read_own")],
+    ["/app/mentor", "Mentor review", permissions.has("mentor.review")],
+    ["/app/osis", "OSIS workspace", permissions.has("osis.review")],
+    ["/app/moderation", "Moderation", permissions.has("moderation.review")],
+    ["/app/admin/members", "Admin · Members", permissions.has("admin.members.read")],
+    ["/app/admin/invitations", "Admin · Invitations", permissions.has("admin.invitations.manage")],
+    ["/app/admin/audit", "Admin · Audit", permissions.has("admin.audit.read")],
   ] as const;
   const logout = async () => { try { await api.logout(); onLogout(); } catch (err) { setLogoutError(err); } };
   return <div className="app-shell">
     <aside className="sidebar"><Link to="/app/dashboard" className="brand"><span className="brand-mark">i</span><span><strong>ImpactOS</strong><small>Pilar Impact Lab</small></span></Link><div className="sidebar-section">WORKSPACE</div><nav>{navItems.filter((item) => item[2]).map(([href, label]) => <Link key={href} className={location.pathname.startsWith(href) ? "active" : ""} to={href}>{label}</Link>)}</nav><div className="sidebar-foot"><div className="private-note">🔒 Private by design<br /><span>Decisions stay with people.</span></div><button className="logout-link" onClick={logout}>Sign out</button></div></aside>
-    <div className="main-area"><header className="topbar"><div className="breadcrumbs">Pilar Impact Lab <span>/</span> {labelFor(location.pathname)}</div><div className="top-actions">{demoMode && <span className="demo-pill">DEMO DATA</span>}<span className="role-chip">{user.display_name} · {user.role.replaceAll("_", " ")}</span><button className="icon-button" onClick={() => navigate("/app/notifications")} aria-label="Notifications">◌</button></div></header><div className="mode-strip">{demoMode ? "Closed-alpha mode · synthetic data only · " : "Member workspace · "}<Link to="/safety-and-privacy">Need help or safeguarding support?</Link></div><main className="content"><ErrorBox error={logoutError} /><Routes>
-      <Route path="/app/dashboard" element={<Dashboard />} />
+    <div className="main-area"><header className="topbar"><div className="breadcrumbs">Pilar Impact Lab <span>/</span> {labelFor(location.pathname)}</div><div className="top-actions">{demoMode && <span className="demo-pill">DEMO DATA</span>}<span className="role-chip">{user.display_name} · {(user.roles?.length ? user.roles.join(" · ") : user.role).replaceAll("_", " ")}</span><button className="icon-button" onClick={() => navigate("/app/notifications")} aria-label="Notifications">◌</button></div></header><div className="mode-strip">{demoMode ? "Closed-alpha mode · synthetic data only · " : "Member workspace · "}<Link to="/safety-and-privacy">Need help or safeguarding support?</Link></div><main className="content"><ErrorBox error={logoutError} /><Routes>
+      <Route path="/app/dashboard" element={<PhaseOneDashboard user={user} />} />
       <Route path="/app" element={<Navigate to="/app/dashboard" replace />} />
       <Route path="/app/problems" element={<Problems />} />
       <Route path="/app/problems/new" element={<NewProblem />} />
@@ -79,10 +87,15 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
       <Route path="/app/research/:researchId" element={<ResearchPage user={user} />} />
       <Route path="/app/projects" element={<ImpactList />} />
       <Route path="/app/projects/:projectId" element={<ImpactPage user={user} />} />
-      <Route path="/app/mentor" element={<MentorPage />} />
-      <Route path="/app/osis" element={<OsisPage />} />
-      <Route path="/app/moderation" element={<ModerationPage />} />
-      <Route path="/app/admin" element={<AdminPage />} />
+      <Route path="/app/profile" element={<PermissionRoute user={user} permission="profile.read_own"><ProfilePage user={user} /></PermissionRoute>} />
+      <Route path="/app/mentor" element={<PermissionRoute user={user} permission="mentor.review"><MentorPage /></PermissionRoute>} />
+      <Route path="/app/osis" element={<PermissionRoute user={user} permission="osis.review"><OsisPage /></PermissionRoute>} />
+      <Route path="/app/moderation" element={<PermissionRoute user={user} permission="moderation.review"><ModerationPage /></PermissionRoute>} />
+      <Route path="/app/admin" element={<Navigate to="/app/admin/members" replace />} />
+      <Route path="/app/admin/members" element={<PermissionRoute user={user} permission="admin.members.read"><AdminMembersPage /></PermissionRoute>} />
+      <Route path="/app/admin/invitations" element={<PermissionRoute user={user} permission="admin.invitations.manage"><AdminInvitationsPage /></PermissionRoute>} />
+      <Route path="/app/admin/audit" element={<PermissionRoute user={user} permission="admin.audit.read"><AdminAuditPage /></PermissionRoute>} />
+      <Route path="/app/admin/legacy" element={<PermissionRoute user={user} permission="admin.members.manage"><AdminPage /></PermissionRoute>} />
       <Route path="/app/notifications" element={<NotificationsPage />} />
       <Route path="/app/tasks" element={<TasksPage />} />
       <Route path="/app/help" element={<HelpPage />} />
@@ -94,6 +107,41 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
 function labelFor(path: string) { if (path.includes("problems")) return "Problems"; if (path.includes("research")) return "Research"; if (path.includes("projects")) return "Impact projects"; if (path.includes("mentor")) return "Mentor review"; if (path.includes("moderation")) return "Moderation"; if (path.includes("osis")) return "OSIS"; if (path.includes("admin")) return "Admin"; return "Dashboard"; }
 
 function PageHeader({ eyebrow, title, description, action }: { eyebrow?: string; title: string; description?: string; action?: ReactNode }) { return <div className="page-header"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1>{description && <p>{description}</p>}</div>{action}</div>; }
+
+function PhaseOneDashboard({ user }: { user: User }) {
+  const roleNames = user.roles?.length ? user.roles : [user.role];
+  return <><PageHeader eyebrow="MEMBER WORKSPACE" title={`Welcome, ${user.display_name}.`} description="Your controlled SPI workspace is ready. Phase 1 keeps access, identity, and governance clear before project work begins." />
+    <div className="hero-card"><div><span className="eyebrow">PILAR IMPACT LAB</span><h2>Access foundation complete.</h2><p>Use this workspace to confirm your account, understand your role assignments, and move into the next gated pilot phase when your school is ready.</p></div><div className="loop-steps"><span>Identity</span><span>Access</span><span>Review</span><span>Ready</span></div></div>
+    <div className="two-column"><section className="panel"><div className="panel-heading"><div><span className="eyebrow">YOUR ACCOUNT</span><h2>Member details</h2></div><StatusBadge>{user.status || "ACTIVE"}</StatusBadge></div><div className="rule-list"><span><strong>Email</strong> {user.email}</span><span><strong>School</strong> {user.school_name || "Pilar Impact Lab"}</span><span><strong>Roles</strong> {roleNames.join(" · ").replaceAll("_", " ")}</span></div><Link className="button" to="/app/profile">View profile and permissions</Link></section><section className="panel"><div className="panel-heading"><div><span className="eyebrow">NEXT PHASE</span><h2>Build deliberately</h2></div></div><p>Problem reporting, research planning, and impact measurement will be enabled only after the school discovery and workflow gates are confirmed.</p><div className="notice">No project data or analytics are shown here until those workflows are connected to real permissions and evidence.</div></section></div></>;
+}
+
+function ProfilePage({ user }: { user: User }) {
+  return <><PageHeader eyebrow="ACCOUNT" title="Your profile" description="Review the identity and permissions currently attached to this school membership." /><div className="two-column"><section className="panel"><div className="panel-heading"><div><span className="eyebrow">IDENTITY</span><h2>{user.display_name}</h2></div><StatusBadge>{user.status || "ACTIVE"}</StatusBadge></div><div className="detail-list"><div><span>Email</span><strong>{user.email}</strong></div><div><span>School</span><strong>{user.school_name || "Pilar Impact Lab"}</strong></div><div><span>Membership</span><code>{user.membership_id || "—"}</code></div></div></section><section className="panel"><div className="panel-heading"><div><span className="eyebrow">ACCESS</span><h2>Active roles and permissions</h2></div></div><div className="chip-row">{(user.roles?.length ? user.roles : [user.role]).map((role) => <StatusBadge key={role}>{role}</StatusBadge>)}</div><div className="rule-list permission-list">{(user.permissions || []).map((permission) => <span key={permission}>✓ {permission}</span>)}</div></section></div></>;
+}
+
+const PHASE_ONE_ROLES = ["STUDENT_CONTRIBUTOR", "STUDENT_PROJECT_LEADER", "MENTOR", "OSIS_REVIEWER", "MODERATOR", "ADMINISTRATOR"];
+
+function AdminMembersPage() {
+  const [members, setMembers] = useState<any[]>([]); const [error, setError] = useState<unknown>(null); const [busy, setBusy] = useState<string | null>(null);
+  const load = () => api.adminMembers().then(setMembers).catch(setError); useEffect(() => { void load(); }, []);
+  const updateRoles = async (member: any, value: string) => { setBusy(member.membership_id); setError(null); try { await api.updateMemberRoles(member.membership_id, [value]); await load(); } catch (err) { setError(err); } finally { setBusy(null); } };
+  const changeStatus = async (member: any) => { if (member.status === "ACTIVE" && !window.confirm(`Deactivate ${member.email}? This revokes all active sessions.`)) return; setBusy(member.membership_id); setError(null); try { if (member.status === "ACTIVE") await api.deactivateMember(member.membership_id); else await api.reactivateMember(member.membership_id); await load(); } catch (err) { setError(err); } finally { setBusy(null); } };
+  return <><PageHeader eyebrow="ADMINISTRATION" title="Members" description="Review school memberships, assign multiple roles, and revoke access when an account is deactivated." /><ErrorBox error={error} /><section className="panel"><div className="table-wrap"><table><thead><tr><th>Member</th><th>Status</th><th>Roles</th><th>Permissions</th><th>Action</th></tr></thead><tbody>{members.map((member) => <tr key={member.id}><td><strong>{member.display_name}</strong><br /><span className="muted">{member.email}</span></td><td><StatusBadge>{member.status}</StatusBadge></td><td><select aria-label={`Role for ${member.email}`} value={member.roles?.[0] || "STUDENT_CONTRIBUTOR"} onChange={(event) => void updateRoles(member, event.target.value)} disabled={busy === member.membership_id}>{PHASE_ONE_ROLES.map((role) => <option key={role} value={role}>{role.replaceAll("_", " ")}</option>)}</select>{member.roles?.length > 1 && <small className="muted">+ {member.roles.slice(1).join(", ")}</small>}</td><td><small>{(member.permissions || []).join(", ") || "—"}</small></td><td><button className={`mini-button ${member.status === "ACTIVE" ? "danger-button" : ""}`} onClick={() => void changeStatus(member)} disabled={busy === member.membership_id}>{member.status === "ACTIVE" ? "Deactivate" : "Reactivate"}</button></td></tr>)}</tbody></table></div>{!members.length && !error && <div className="empty-state"><h2>No members found.</h2></div>}</section></>;
+}
+
+function AdminInvitationsPage() {
+  const [invitations, setInvitations] = useState<any[]>([]); const [error, setError] = useState<unknown>(null); const [busy, setBusy] = useState(false); const [activationPath, setActivationPath] = useState(""); const [invite, setInvite] = useState({ email: "", role: "STUDENT_CONTRIBUTOR", expires_in_days: "7" });
+  const load = () => api.adminInvitations().then(setInvitations).catch(setError); useEffect(() => { void load(); }, []);
+  const create = async (event: FormEvent) => { event.preventDefault(); setBusy(true); setError(null); try { const result = await api.createInvitation({ email: invite.email, roles: [invite.role], role: invite.role, expires_in_days: Number(invite.expires_in_days) }); setActivationPath(result.activation_path); setInvite((current) => ({ ...current, email: "" })); await load(); } catch (err) { setError(err); } finally { setBusy(false); } };
+  const revoke = async (id: string) => { setBusy(true); try { await api.revokeInvitation(id); await load(); } catch (err) { setError(err); } finally { setBusy(false); } };
+  const resend = async (id: string) => { setBusy(true); try { const result = await api.resendInvitation(id); setActivationPath(result.activation_path); await load(); } catch (err) { setError(err); } finally { setBusy(false); } };
+  return <><PageHeader eyebrow="ADMINISTRATION" title="Invitations" description="Create single-use activation links through the approved school channel. Tokens are shown once and are never stored in plaintext." /><ErrorBox error={error} /><div className="two-column"><section className="panel"><div className="panel-heading"><div><span className="eyebrow">CONTROLLED ACTIVATION</span><h2>Invite a member</h2></div></div><form className="form-grid" onSubmit={create}><label className="wide">School email<input required type="email" value={invite.email} onChange={(event) => setInvite({ ...invite, email: event.target.value })} /></label><label>Role<select value={invite.role} onChange={(event) => setInvite({ ...invite, role: event.target.value })}>{PHASE_ONE_ROLES.map((role) => <option key={role} value={role}>{role.replaceAll("_", " ")}</option>)}</select></label><label>Expires in days<input type="number" min="1" max="30" value={invite.expires_in_days} onChange={(event) => setInvite({ ...invite, expires_in_days: event.target.value })} /></label><button className="button primary wide" disabled={busy}>Create invitation</button></form>{activationPath && <div className="notice auth-success"><strong>Copy this activation path once:</strong><br /><code>{activationPath}</code></div>}</section><section className="panel"><div className="panel-heading"><div><span className="eyebrow">INVITATION STATES</span><h2>Recent invitations</h2></div></div><div className="list-stack admin-list">{invitations.map((item) => <div className="list-row" key={item.id}><div><strong>{item.email}</strong><p>{(item.roles || [item.role]).join(" · ")} · {item.state}</p></div><div className="decision-buttons">{item.state === "ACTIVE" && <button className="mini-button" onClick={() => void revoke(item.id)} disabled={busy}>Revoke</button>}{item.state !== "USED" && item.state !== "ACTIVE" && <button className="mini-button" onClick={() => void resend(item.id)} disabled={busy}>Resend</button>}</div></div>)}</div>{!invitations.length && <p className="muted">No invitations yet.</p>}</section></div></>;
+}
+
+function AdminAuditPage() {
+  const [logs, setLogs] = useState<any[]>([]); const [error, setError] = useState<unknown>(null); useEffect(() => { api.adminAudit().then(setLogs).catch(setError); }, []);
+  return <><PageHeader eyebrow="ADMINISTRATION" title="Audit trail" description="Review safe administrative and authentication events without exposing passwords, raw tokens, or sensitive report content." /><ErrorBox error={error} /><section className="panel"><div className="table-wrap"><table><thead><tr><th>Time</th><th>Action</th><th>Entity</th><th>Request</th><th>Safe metadata</th></tr></thead><tbody>{logs.map((log) => <tr key={log.id}><td>{log.created_at ? new Date(log.created_at).toLocaleString() : "—"}</td><td><strong>{log.action}</strong></td><td>{log.entity_type}<br /><span className="muted">{log.entity_id}</span></td><td><code>{log.request_id || "—"}</code></td><td><code>{JSON.stringify(log.metadata)}</code></td></tr>)}</tbody></table></div>{!logs.length && !error && <div className="empty-state"><h2>No audit events yet.</h2></div>}</section></>;
+}
 
 function Dashboard() {
   const [data, setData] = useState<any>(null); const [error, setError] = useState<unknown>(null);

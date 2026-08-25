@@ -18,6 +18,12 @@ class UserRead(BaseModel):
     display_name: str
     role: str
     school_id: str
+    status: str = "ACTIVE"
+
+
+class AuthMeResponse(BaseModel):
+    user: dict[str, Any]
+    memberships: list[dict[str, Any]]
 
 
 class ProblemCreate(BaseModel):
@@ -148,12 +154,16 @@ class ReportUpdate(BaseModel):
 class InvitationCreate(BaseModel):
     email: str
     role: Literal["STUDENT", "STUDENT_LEADER", "MENTOR", "OSIS"] = "STUDENT"
+    roles: list[str] | None = None
     expires_in_days: int = Field(default=7, ge=1, le=30)
 
 
 class InvitationAccept(BaseModel):
+    email: str | None = None
     display_name: str = Field(min_length=2, max_length=160)
     password: str = Field(min_length=10, max_length=128)
+    password_confirmation: str | None = None
+    accepted_rules: bool = True
 
 
 class ActivationEmailRequest(BaseModel):
@@ -167,3 +177,7 @@ class PasswordForgotRequest(BaseModel):
 class PasswordResetRequest(BaseModel):
     token: str
     password: str = Field(min_length=10, max_length=128)
+
+
+class RoleAssignmentRequest(BaseModel):
+    roles: list[str] = Field(min_length=1)

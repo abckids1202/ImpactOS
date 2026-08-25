@@ -20,7 +20,9 @@ class School(Base):
     slug: Mapped[str] = mapped_column(String(80), unique=True)
     mode: Mapped[str] = mapped_column(String(30), default="DEMO")
     language: Mapped[str] = mapped_column(String(20), default="en")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 
 
 class User(Base):
@@ -32,7 +34,42 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(30), index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(20), default="ACTIVE", index=True)
+    last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
+class Membership(Base):
+    __tablename__ = "memberships"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    school_id: Mapped[str] = mapped_column(ForeignKey("schools.id"), index=True)
+    student_identifier: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    grade_id: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    class_id: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="ACTIVE", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    __table_args__ = (UniqueConstraint("user_id", "school_id", name="uq_membership_user_school"),)
+
+
+class Role(Base):
+    __tablename__ = "roles"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    code: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str] = mapped_column(Text, default="")
+
+
+class RoleAssignment(Base):
+    __tablename__ = "role_assignments"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    membership_id: Mapped[str] = mapped_column(ForeignKey("memberships.id"), index=True)
+    role_id: Mapped[str] = mapped_column(ForeignKey("roles.id"), index=True)
+    assigned_by: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id"), nullable=True)
+    assigned_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    __table_args__ = (UniqueConstraint("membership_id", "role_id", name="uq_role_assignment"),)
 
 
 class SchoolSetting(Base):
@@ -283,12 +320,14 @@ class Notification(Base):
 class AuditLog(Base):
     __tablename__ = "audit_logs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    school_id: Mapped[str] = mapped_column(ForeignKey("schools.id"), index=True)
+    school_id: Mapped[Optional[str]] = mapped_column(ForeignKey("schools.id"), nullable=True, index=True)
     actor_id: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    actor_user_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
     action: Mapped[str] = mapped_column(String(100), index=True)
     entity_type: Mapped[str] = mapped_column(String(60), index=True)
     entity_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
     metadata_safe: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    request_id: Mapped[Optional[str]] = mapped_column(String(80), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
 
 
@@ -300,10 +339,32 @@ class Invitation(Base):
     role: Mapped[str] = mapped_column(String(30), default="STUDENT")
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime)
+    status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
+    invited_by: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    used_by: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class InvitationRole(Base):
+    __tablename__ = "invitation_roles"
+    invitation_id: Mapped[str] = mapped_column(ForeignKey("invitations.id"), primary_key=True)
+    role_id: Mapped[str] = mapped_column(ForeignKey("roles.id"), primary_key=True)
+
+
+class AuthSession(Base):
+    __tablename__ = "sessions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    ip_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
 
 class PasswordResetToken(Base):

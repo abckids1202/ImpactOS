@@ -6,6 +6,11 @@ export interface User {
   display_name: string;
   role: Role;
   school_id: string;
+  status?: "PENDING" | "ACTIVE" | "DEACTIVATED";
+  roles?: string[];
+  permissions?: string[];
+  membership_id?: string;
+  school_name?: string;
 }
 
 export interface Cluster {

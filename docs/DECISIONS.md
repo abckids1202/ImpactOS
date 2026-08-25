@@ -1,6 +1,6 @@
 # ImpactOS Implementation Decisions
 
-Updated: 24 August 2026
+Updated: 25 August 2026
 
 These are implementation decisions for the synthetic closed alpha. They are not substitutes for Pilar policy approval.
 
@@ -9,7 +9,7 @@ These are implementation decisions for the synthetic closed alpha. They are not 
 | Local database | SQLite by default | Zero-setup development; SQLAlchemy configuration accepts PostgreSQL through `DATABASE_URL`. |
 | Primary API | FastAPI + SQLAlchemy | Matches the definitive plan and keeps domain checks testable. |
 | Frontend | React + TypeScript + Vite | Keeps the app shell and API-backed workflow easy to run locally. |
-| Authentication | Invite-only-style demo login with signed HTTP-only session cookie | No public registration; synthetic demo accounts are easy to test. |
+| Authentication | Invite-only activation plus opaque, database-backed HTTP-only sessions | No public registration; Argon2id password hashes, server-side revocation, and multi-role memberships are testable and production-aligned. |
 | Route boundary | Public and auth pages at the root; all protected workspace pages under `/app/*` | Prevents accidental exposure of member UI and provides a stable safe redirect target. |
 | Public stories | Separate `PublicImpactStory` records with an allowlisted serializer | A public story is an explicit publication decision, not a view over internal project data. |
 | Activation | Single-use hashed invitation tokens; neutral verified-email and password-recovery responses | Avoids account enumeration and does not claim that email delivery exists before a provider is configured. |
@@ -22,8 +22,8 @@ These are implementation decisions for the synthetic closed alpha. They are not 
 
 ## Assumptions to revisit
 
-- The current single `User.role` field is enough for the first synthetic alpha; production needs school-scoped role assignments.
-- `scripts/migrate.py` uses SQLAlchemy metadata creation for the zero-setup alpha; a full Alembic migration history should be added before staging.
-- The local session signer is suitable for development only; production needs managed secrets and deployment configuration.
+- `User.role` remains only as a legacy compatibility field; `Membership` + `RoleAssignment` is authoritative for Phase 1 access decisions.
+- `scripts/migrate.py` remains the zero-setup local bootstrap; the checked-in Alembic migration is the staging migration path after the base schema exists.
+- Sessions store only a SHA-256 token hash in the database; production still needs managed secrets, HTTPS, secure cookies, and deployment configuration.
 - The deterministic sensitivity and methodology checks are fixtures, not a safeguarding decision engine.
 - The public institution copy, official contact/support route, verified-school-email domain, mail provider, and publication approver still require Pilar confirmation.
