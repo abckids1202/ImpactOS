@@ -111,3 +111,33 @@ def test_leader_can_complete_owned_task_and_other_student_cannot_update_it(clien
     client.post("/api/v1/auth/logout", headers=csrf_headers(client))
     login(client, "student@demo.local")
     assert client.patch(f"/api/v1/tasks/{task['id']}", headers=csrf_headers(client), json={"status": "COMPLETED"}).status_code in {403, 404}
+
+
+def test_search_respects_role_visibility(client: TestClient) -> None:
+    login(client, "osis@demo.local")
+    response = client.get("/api/v1/search?q=private%20synthetic")
+    assert response.status_code == 200
+    assert response.json()["items"] == []
+
+    client.post("/api/v1/auth/logout", headers=csrf_headers(client))
+    login(client, "moderator@demo.local")
+    response = client.get("/api/v1/search?q=private%20synthetic")
+    assert response.status_code == 200
+    assert any(item["id"] == "report-canteen-7" for item in response.json()["items"])
+
+
+def test_member_feedback_is_safe_and_admin_managed(client: TestClient) -> None:
+    login(client, "student@demo.local")
+    created = client.post("/api/v1/feedback", headers=csrf_headers(client), json={"category": "CONFUSING", "description": "The next step on the report page could be clearer.", "severity": "LOW", "route": "/app/reports", "user_role": "Student contributor", "browser": "test browser", "screen_size": "390x844", "app_version": "0.1.0"})
+    assert created.status_code == 200, created.text
+    feedback_id = created.json()["feedback"]["id"]
+    assert "session" not in created.text.lower()
+
+    client.post("/api/v1/auth/logout", headers=csrf_headers(client))
+    login(client, "admin@demo.local")
+    listing = client.get("/api/v1/admin/feedback")
+    assert listing.status_code == 200
+    assert any(item["id"] == feedback_id for item in listing.json())
+    updated = client.patch(f"/api/v1/admin/feedback/{feedback_id}", headers=csrf_headers(client), json={"status": "TRIAGED"})
+    assert updated.status_code == 200
+    assert updated.json()["status"] == "TRIAGED"

@@ -190,3 +190,15 @@ class RoleAssignmentRequest(BaseModel):
 
 class TaskUpdate(BaseModel):
     status: Literal["TODO", "IN_PROGRESS", "BLOCKED", "COMPLETED"]
+
+
+class FeedbackCreate(BaseModel):
+    category: Literal["BROKEN", "CONFUSING", "SUGGESTION", "ACCESSIBILITY", "OTHER"]
+    description: str = Field(min_length=10, max_length=4000)
+    severity: Literal["LOW", "MEDIUM", "HIGH"] = "MEDIUM"
+    allow_contact: bool = False
+    route: str = Field(default="", max_length=255)
+    user_role: str = Field(default="", max_length=80)
+    browser: str = Field(default="", max_length=120)
+    screen_size: str = Field(default="", max_length=40)
+    app_version: str = Field(default="0.1.0", max_length=40)

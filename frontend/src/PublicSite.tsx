@@ -2,6 +2,7 @@ import { ReactNode, useEffect, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { api } from "./api";
 import type { User } from "./types";
+import { ThemeToggle } from "./ui";
 
 const officialSite = "https://sekolah-pilar-indonesia.sch.id/";
 
@@ -21,16 +22,20 @@ function PageMeta({ title, description }: { title: string; description: string }
 
 export function PublicLayout({ user, children }: { user: User | null; children: ReactNode }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [scrolled, setScrolled] = useState(false);
   const location = useLocation();
   useEffect(() => { setMenuOpen(false); }, [location.pathname]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") setMenuOpen(false); };
+    const onScroll = () => setScrolled(window.scrollY > 12);
     document.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
     document.body.style.overflow = menuOpen ? "hidden" : "";
-    return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = ""; };
+    return () => { document.removeEventListener("keydown", onKey); window.removeEventListener("scroll", onScroll); document.body.style.overflow = ""; };
   }, [menuOpen]);
   const close = () => setMenuOpen(false);
-  return <div className="public-site"><a className="skip-link" href="#main-content">Skip to content</a><div className="public-announcement">Pilar Impact Lab is currently being developed and tested with synthetic data.</div><header className="public-header"><Link to="/" className="public-brand" onClick={close}><span className="spi-mark">SPI</span><span><strong>Pilar Impact Lab</strong><small>Sekolah Pilar Indonesia · powered by ImpactOS</small></span></Link><button className="mobile-menu-button" aria-expanded={menuOpen} aria-controls="public-navigation" onClick={() => setMenuOpen((value) => !value)}><span /> <span /> <span /><b className="sr-only">Menu</b></button><nav id="public-navigation" className={`public-navigation ${menuOpen ? "open" : ""}`} aria-label="Public navigation"><Link to="/" onClick={close}>Home</Link><Link to="/about" onClick={close}>About</Link><Link to="/how-it-works" onClick={close}>How It Works</Link><Link to="/impact" onClick={close}>Impact Stories</Link><Link to="/safety-and-privacy" onClick={close}>Safety &amp; Privacy</Link><Link to="/faq" onClick={close}>FAQ</Link><Link to="/contact" onClick={close}>Contact</Link><div className="public-member-actions"><Link className="public-login" to={user ? "/app/dashboard" : "/login"} onClick={close}>{user ? "Open Dashboard" : "Member Login"}</Link>{!user && <Link className="public-activate" to="/activate" onClick={close}>Activate SPI Account</Link>}</div></nav></header><main id="main-content">{children}</main><PublicFooter /></div>;
+  return <div className="public-site"><a className="skip-link" href="#main-content">Skip to content</a><div className="public-announcement">Pilar Impact Lab is currently being developed and tested with synthetic data.</div><header className={`public-header ${scrolled ? "scrolled" : ""}`}><Link to="/" className="public-brand" onClick={close}><span className="spi-mark">SPI</span><span><strong>Pilar Impact Lab</strong><small>Sekolah Pilar Indonesia · powered by ImpactOS</small></span></Link><div className="public-header-tools"><ThemeToggle /><button className="mobile-menu-button" aria-expanded={menuOpen} aria-controls="public-navigation" onClick={() => setMenuOpen((value) => !value)}><span /> <span /> <span /><b className="sr-only">Menu</b></button></div><nav id="public-navigation" className={`public-navigation ${menuOpen ? "open" : ""}`} aria-label="Public navigation"><Link to="/" onClick={close}>Home</Link><Link to="/about" onClick={close}>About</Link><Link to="/how-it-works" onClick={close}>How It Works</Link><Link to="/impact" onClick={close}>Impact Stories</Link><Link to="/safety-and-privacy" onClick={close}>Safety &amp; Privacy</Link><Link to="/faq" onClick={close}>FAQ</Link><Link to="/contact" onClick={close}>Contact</Link><div className="public-member-actions"><Link className="public-login" to={user ? "/app/dashboard" : "/login"} onClick={close}>{user ? "Open Dashboard" : "Member Login"}</Link>{!user && <Link className="public-activate" to="/activate" onClick={close}>Activate SPI Account</Link>}</div></nav></header><main id="main-content">{children}</main><PublicFooter /></div>;
 }
 
 function PublicFooter() { return <footer className="public-footer"><div className="footer-main"><div><Link to="/" className="public-brand footer-brand"><span className="spi-mark">SPI</span><span><strong>Pilar Impact Lab</strong><small>Sekolah Pilar Indonesia</small></span></Link><p>Helping the SPI community move from meaningful concerns to measurable, responsible change.</p></div><div><h3>Explore</h3><Link to="/about">About</Link><Link to="/how-it-works">How It Works</Link><Link to="/impact">Impact Stories</Link></div><div><h3>Trust &amp; access</h3><Link to="/safety-and-privacy">Safety &amp; Privacy</Link><Link to="/faq">FAQ</Link><Link to="/login">Member Login</Link><Link to="/activate">Activate Account</Link></div><div><h3>Institution</h3><a href={officialSite} target="_blank" rel="noreferrer">Official SPI website ↗</a><Link to="/contact">Contact</Link><span>Pilot status: closed alpha</span></div></div><div className="footer-bottom"><span>© {new Date().getFullYear()} Pilar Impact Lab · Sekolah Pilar Indonesia</span><span>Powered by ImpactOS</span></div></footer>; }

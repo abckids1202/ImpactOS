@@ -17,7 +17,13 @@ This repository now contains the closed-alpha implementation baseline and the pl
 - Connected closed-alpha scenario for “Long canteen queues during the second break,” including student reports and follows, moderation decisions, a versioned research plan, mentor review, an OSIS priority/update draft, an impact project, and assigned tasks.
 - Real API-backed workflows for dashboard, problem reports, private moderation, clusters, signals, evidence, research plans, mentor review, surveys, analysis/export, impact projects, metrics, baseline activation, observations, impact reports, OSIS overview, notifications, and audit logs.
 - Synthetic seed data also retains the original golden path: Assessment Workload Concentration → Deadline research → Shared Assessment Calendar → observed change.
+- Pilar Civic Lab UI foundation: semantic light/dark themes, responsive app shell with mobile navigation, sticky public navigation, editorial public styling, accessible focus states, reduced-motion support, loading/empty/error surfaces, and consistent status/button/form treatments.
+- Workspace utilities: authorized record search with keyboard shortcuts (`Ctrl/Cmd+K` or `/`), offline status notice, back-to-top control, in-app feedback submission, and an administrator feedback triage queue. Feedback stores safe context only and never includes passwords, session tokens, or private record contents.
 - Planning and discovery artifacts in `docs/`.
+
+### UI polish boundary
+
+This phase intentionally improves the product surface while preserving the existing API-backed workflows and permission model. The repository does not yet include production file storage, so drag-and-drop evidence uploads, upload progress, offline write queues, and draft autosave remain deferred. Full notification preferences, saved/recent records, command-palette actions beyond search, PWA installation, localization, and automated browser visual regression are also follow-on work for the closed alpha.
 
 ## Run locally
 

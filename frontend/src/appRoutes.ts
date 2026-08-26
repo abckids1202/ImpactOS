@@ -29,6 +29,7 @@ export const APP_PATHS = {
   adminMembers: "/app/admin/members",
   adminInvitations: "/app/admin/invitations",
   adminAudit: "/app/admin/audit",
+  adminFeedback: "/app/admin/feedback",
   notifications: "/app/notifications",
 } as const;
 
@@ -45,6 +46,7 @@ export const APP_ROUTES: AppRouteDefinition[] = [
   { id: "adminMembers", path: APP_PATHS.adminMembers, label: "Members", icon: "◎", permission: "admin.members.read", group: "administration", sidebar: true, mobile: true },
   { id: "adminInvitations", path: APP_PATHS.adminInvitations, label: "Invitations", icon: "✉", permission: "admin.invitations.manage", group: "administration", sidebar: true, mobile: true },
   { id: "adminAudit", path: APP_PATHS.adminAudit, label: "Audit log", icon: "≡", permission: "admin.audit.read", group: "administration", sidebar: true, mobile: true },
+  { id: "adminFeedback", path: APP_PATHS.adminFeedback, label: "Feedback", icon: "↯", permission: "admin.feedback.read", group: "administration", sidebar: true, mobile: true },
   { id: "profile", path: APP_PATHS.profile, label: "My profile", icon: "◌", permission: "profile.read_own", group: "workspace", sidebar: true, mobile: true },
 ];
 

@@ -340,6 +340,25 @@ class Notification(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
+class Feedback(Base):
+    __tablename__ = "feedback"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    school_id: Mapped[Optional[str]] = mapped_column(ForeignKey("schools.id"), nullable=True, index=True)
+    reporter_id: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    category: Mapped[str] = mapped_column(String(40))
+    description: Mapped[str] = mapped_column(Text)
+    severity: Mapped[str] = mapped_column(String(20), default="MEDIUM")
+    allow_contact: Mapped[bool] = mapped_column(Boolean, default=False)
+    route: Mapped[str] = mapped_column(String(255), default="")
+    user_role: Mapped[str] = mapped_column(String(80), default="")
+    browser: Mapped[str] = mapped_column(String(120), default="")
+    screen_size: Mapped[str] = mapped_column(String(40), default="")
+    app_version: Mapped[str] = mapped_column(String(40), default="0.1.0")
+    status: Mapped[str] = mapped_column(String(20), default="NEW", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

@@ -5,6 +5,7 @@ import { APP_PATHS, humanizeRole, humanizeStatus, visibleAppRoutes } from "./app
 import { ActivatePage, ForgotPasswordPage, InvitePage, MemberLogin, PermissionRoute, ProtectedRoute, ResetPasswordPage, UnauthorizedPage } from "./AuthPages";
 import { HowItWorks, PublicAbout, PublicContact, PublicFaq, PublicHome, PublicImpactDetail, PublicImpactIndex, PublicLayout, PublicSafety } from "./PublicSite";
 import type { Cluster, ImpactProject, Research, User } from "./types";
+import { GlobalUtilities } from "./ui";
 
 function StatusBadge({ children }: { children: ReactNode }) {
   return <span className="status-badge">{humanizeStatus(String(children))}</span>;
@@ -26,7 +27,7 @@ function App() {
     api.me().then(setUser).catch(() => setUser(null)).finally(() => setChecking(false));
   }, []);
   const publicPage = (page: ReactNode) => <PublicLayout user={user}>{page}</PublicLayout>;
-  return <Routes>
+  return <><GlobalUtilities user={user} /><Routes>
     <Route path="/" element={publicPage(<PublicHome user={user} />)} />
     <Route path="/about" element={publicPage(<PublicAbout />)} />
     <Route path="/how-it-works" element={publicPage(<HowItWorks />)} />
@@ -56,7 +57,7 @@ function App() {
     <Route path="/admin/*" element={<Navigate to="/app/admin" replace />} />
     <Route path="/help" element={<Navigate to="/safety-and-privacy" replace />} />
     <Route path="*" element={publicPage(<div className="public-empty public-not-found"><h1>That page does not exist.</h1><p>Return to the Pilar Impact Lab homepage or sign in to the member workspace.</p><Link className="public-button primary" to="/">Return home</Link></div>)} />
-  </Routes>;
+  </Routes></>;
 }
 
 function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
@@ -97,6 +98,7 @@ function Shell({ user, onLogout }: { user: User; onLogout: () => void }) {
       <Route path="/app/admin/members" element={<PermissionRoute user={user} permission="admin.members.read"><AdminMembersPage /></PermissionRoute>} />
       <Route path="/app/admin/invitations" element={<PermissionRoute user={user} permission="admin.invitations.manage"><AdminInvitationsPage /></PermissionRoute>} />
       <Route path="/app/admin/audit" element={<PermissionRoute user={user} permission="admin.audit.read"><AdminAuditPage /></PermissionRoute>} />
+      <Route path="/app/admin/feedback" element={<PermissionRoute user={user} permission="admin.feedback.read"><AdminFeedbackPage /></PermissionRoute>} />
       <Route path="/app/admin/legacy" element={<PermissionRoute user={user} permission="admin.members.manage"><AdminPage /></PermissionRoute>} />
       <Route path="/app/notifications" element={<NotificationsPage />} />
       <Route path="/app/tasks" element={<PermissionRoute user={user} permission="task.read_assigned"><TasksPage /></PermissionRoute>} />
@@ -166,6 +168,14 @@ function AdminInvitationsPage() {
 function AdminAuditPage() {
   const [logs, setLogs] = useState<any[]>([]); const [error, setError] = useState<unknown>(null); useEffect(() => { api.adminAudit().then(setLogs).catch(setError); }, []);
   return <><PageHeader eyebrow="ADMINISTRATION" title="Audit trail" description="Review safe administrative and authentication events without exposing passwords, raw tokens, or sensitive report content." /><ErrorBox error={error} /><section className="panel"><div className="table-wrap"><table><thead><tr><th>Time</th><th>Action</th><th>Entity</th><th>Request</th><th>Safe metadata</th></tr></thead><tbody>{logs.map((log) => <tr key={log.id}><td>{log.created_at ? new Date(log.created_at).toLocaleString() : "—"}</td><td><strong>{log.action}</strong></td><td>{log.entity_type}<br /><span className="muted">{log.entity_id}</span></td><td><code>{log.request_id || "—"}</code></td><td><code>{JSON.stringify(log.metadata)}</code></td></tr>)}</tbody></table></div>{!logs.length && !error && <div className="empty-state"><h2>No audit events yet.</h2></div>}</section></>;
+}
+
+function AdminFeedbackPage() {
+  const [items, setItems] = useState<any[]>([]); const [filter, setFilter] = useState("ALL"); const [error, setError] = useState<unknown>(null); const [busy, setBusy] = useState<string | null>(null);
+  const load = () => api.adminFeedback().then(setItems).catch(setError); useEffect(() => { void load(); }, []);
+  const update = async (id: string, status: string) => { setBusy(id); setError(null); try { const item = await api.updateFeedback(id, status); setItems((current) => current.map((entry) => entry.id === id ? item : entry)); } catch (err) { setError(err); } finally { setBusy(null); } };
+  const visible = filter === "ALL" ? items : items.filter((item) => item.status === filter);
+  return <><PageHeader eyebrow="ADMINISTRATION" title="Feedback" description="Review product feedback without exposing private workspace content. Safe context is attached automatically; status changes are recorded in the audit log." /><ErrorBox error={error} /><section className="panel filter-panel"><div className="filter-row"><label>Status<select value={filter} onChange={(event) => setFilter(event.target.value)}><option value="ALL">All feedback</option><option value="NEW">New</option><option value="TRIAGED">Triaged</option><option value="PLANNED">Planned</option><option value="RESOLVED">Resolved</option><option value="CLOSED">Closed</option></select></label><span className="results-count">{visible.length} item{visible.length === 1 ? "" : "s"}</span></div></section><section className="feedback-admin-list">{visible.map((item) => <article className="panel feedback-admin-card" key={item.id}><div className="card-top"><div><span className="eyebrow">{item.category}</span><h2>{item.description}</h2></div><StatusBadge>{item.status}</StatusBadge></div><div className="feedback-meta"><span>{item.severity} severity</span><span>{item.route || "Unknown route"}</span><span>{item.user_role || "Member"}</span><span>{item.created_at ? new Date(item.created_at).toLocaleString() : ""}</span></div><div className="feedback-actions"><label>Update status<select value={item.status} disabled={busy === item.id} onChange={(event) => void update(item.id, event.target.value)}><option value="NEW">New</option><option value="TRIAGED">Triaged</option><option value="PLANNED">Planned</option><option value="RESOLVED">Resolved</option><option value="CLOSED">Closed</option></select></label></div></article>)}{!visible.length && !error && <div className="empty-state"><h2>No feedback in this view.</h2><p>Member feedback will appear here after a submission.</p></div>}</section></>;
 }
 
 function Dashboard() {

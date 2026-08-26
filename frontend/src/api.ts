@@ -47,6 +47,7 @@ export const api = {
     return { ...result.user, role, school_id: membership?.school?.id || "", school_name: membership?.school?.name, roles: membership?.roles || [], permissions: membership?.permissions || [], membership_id: membership?.id } as import("./types").User;
   },
   dashboard: (workspace?: string) => request<any>(workspace ? `/dashboard?workspace=${encodeURIComponent(workspace)}` : "/dashboard"),
+  search: (query: string) => request<{ items: any[]; query: string }>(`/search?q=${encodeURIComponent(query)}`),
   clusters: (params = "") => request<import("./types").Cluster[]>(`/problems${params}`),
   cluster: (id: string) => request<import("./types").Cluster>(`/problems/${id}`),
   myReports: () => request<any[]>("/problem-reports/mine"),
@@ -100,4 +101,8 @@ export const api = {
   createPublicStory: (payload: Record<string, unknown>) => request<any>("/admin/public-impact-stories", { method: "POST", body: JSON.stringify(payload) }),
   publicStoryAction: (id: string, action: "submit-review" | "approve" | "publish" | "withdraw") => request<any>(`/admin/public-impact-stories/${id}/${action}`, { method: "POST" }),
   notifications: () => request<any[]>("/notifications"),
+  markNotificationRead: (id: string) => request<{ status: string }>(`/notifications/${id}/read`, { method: "POST" }),
+  feedback: (payload: Record<string, unknown>) => request<any>("/feedback", { method: "POST", body: JSON.stringify(payload) }),
+  adminFeedback: () => request<any[]>("/admin/feedback"),
+  updateFeedback: (id: string, status: string) => request<any>(`/admin/feedback/${id}`, { method: "PATCH", body: JSON.stringify({ status }) }),
 };

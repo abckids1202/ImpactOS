@@ -26,6 +26,7 @@ from .models import (
     AuditLog,
     AuthSession,
     Evidence,
+    Feedback,
     ImpactProject,
     ImpactReport,
     Metric,
@@ -59,6 +60,7 @@ from .models import (
 from .schemas import (
     DecisionRequest,
     EvidenceCreate,
+    FeedbackCreate,
     ImpactCreate,
     ImpactUpdate,
     InvitationAccept,
@@ -914,6 +916,61 @@ def dashboard(workspace: str | None = None, actor: User = Depends(get_current_us
     return {"viewer": {"id": actor.id, "display_name": actor.display_name, "school": {"id": school.id if school else actor.school_id, "name": school.name if school else "Pilar Impact Lab", "slug": school.slug if school else "pilar-impact-lab"}, "roles": [{"code": code, "label": ROLE_DETAILS.get(code, (code.replace("_", " ").title(), ""))[0]} for code in active_roles], "active_workspace": selected_role, "responsibility": role_description}, "primary_action": primary_action, "summary": summary, "attention_items": attention, "my_work": my_work, "recent_updates": recent, "role_sections": role_sections, "mode": app_mode(), "synthetic_data": app_mode() == "DEMO"}
 
 
+@app.get(f"{API}/search")
+def search(q: str = "", limit: int = 12, actor: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    """Search only records the current member is already allowed to discover."""
+    term = q.strip().lower()
+    if len(term) < 2:
+        return {"items": [], "query": q}
+    limit = max(1, min(limit, 30))
+    admin = has_active_role(db, actor, "ADMIN")
+    reviewer = has_active_role(db, actor, "MODERATOR", "ADMIN")
+    student = has_active_role(db, actor, "STUDENT", "STUDENT_LEADER")
+    leader = has_active_role(db, actor, "STUDENT_LEADER")
+    mentor = has_active_role(db, actor, "MENTOR")
+    osis = has_active_role(db, actor, "OSIS")
+
+    def matches(*values: Any) -> bool:
+        return any(term in str(value or "").lower() for value in values)
+
+    items: list[dict[str, Any]] = []
+
+    clusters = db.scalars(select(ProblemCluster).where(ProblemCluster.school_id == actor.school_id)).all()
+    for cluster in clusters:
+        if osis and not reviewer and cluster.status != "VALIDATED":
+            continue
+        if matches(cluster.title, cluster.summary, cluster.category, cluster.scope):
+            items.append({"id": cluster.id, "type": "problem", "label": "Problem", "title": cluster.title, "description": cluster.summary, "status": cluster.status, "href": f"/app/problems/{cluster.id}"})
+
+    reports = db.scalars(select(ProblemReport).where(ProblemReport.school_id == actor.school_id, ProblemReport.author_id == actor.id if not reviewer else True)).all()
+    for report in reports:
+        if not reviewer and report.author_id != actor.id:
+            continue
+        if matches(report.title, report.description, report.category, report.scope):
+            items.append({"id": report.id, "type": "report", "label": "My report" if report.author_id == actor.id else "Report", "title": report.title, "description": "Restricted report" if report.visibility == "PRIVATE_REVIEW" and not reviewer else report.description, "status": report.status, "href": f"/app/reports/{report.id}" if report.author_id == actor.id else f"/app/moderation/reports/{report.id}"})
+
+    research_query = select(ResearchProject).where(ResearchProject.school_id == actor.school_id)
+    for research in db.scalars(research_query).all():
+        if not admin and not ((leader and research.leader_id == actor.id) or (mentor and research.mentor_id == actor.id)):
+            continue
+        if matches(research.title, research.status):
+            items.append({"id": research.id, "type": "research", "label": "Research", "title": research.title, "description": "Research workspace", "status": research.status, "href": f"/app/research/{research.id}"})
+
+    project_query = select(ImpactProject).where(ImpactProject.school_id == actor.school_id)
+    for project in db.scalars(project_query).all():
+        if not admin and not ((mentor and project.mentor_id == actor.id) or ((leader or student) and project.leader_id == actor.id)):
+            continue
+        if matches(project.title, project.status, project.intervention):
+            items.append({"id": project.id, "type": "project", "label": "Impact project", "title": project.title, "description": "Impact workspace", "status": project.status, "href": f"/app/projects/{project.id}"})
+
+    for task in db.scalars(select(ProjectTask).where(ProjectTask.owner_id == actor.id)).all():
+        if matches(task.title, task.status, task.priority):
+            items.append({"id": task.id, "type": "task", "label": "Task", "title": task.title, "description": "Assigned task", "status": task.status, "href": "/app/tasks"})
+
+    items.sort(key=lambda item: (0 if item["title"].lower().startswith(term) else 1, item["title"].lower()))
+    return {"items": items[:limit], "query": q}
+
+
 @app.get(f"{API}/problem-reports")
 def list_reports(actor: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[dict[str, Any]]:
     reports = db.scalars(select(ProblemReport).where(ProblemReport.school_id == actor.school_id).order_by(ProblemReport.updated_at.desc())).all()
@@ -1693,6 +1750,40 @@ def mark_notification_read(notification_id: str, actor: User = Depends(get_curre
     notification.read = True
     db.commit()
     return {"status": "read"}
+
+
+def feedback_dict(item: Feedback) -> dict[str, Any]:
+    return {"id": item.id, "category": item.category, "description": item.description, "severity": item.severity, "allow_contact": item.allow_contact, "route": item.route, "user_role": item.user_role, "browser": item.browser, "screen_size": item.screen_size, "app_version": item.app_version, "status": item.status, "created_at": dt(item.created_at), "updated_at": dt(item.updated_at)}
+
+
+@app.post(f"{API}/feedback", dependencies=[Depends(require_csrf)])
+def create_feedback(payload: FeedbackCreate, request: Request, actor: User = Depends(require_permissions("feedback.submit")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    enforce_rate_limit(request, "feedback", limit=5, window_seconds=600)
+    item = Feedback(id=new_id(), school_id=actor.school_id, reporter_id=actor.id, **payload.model_dump())
+    db.add(item)
+    audit(db, actor, "FEEDBACK_SUBMITTED", "FEEDBACK", item.id, {"category": item.category, "severity": item.severity, "route": item.route}, request=request)
+    db.commit()
+    return {"message": "Thank you. Your feedback was sent to the ImpactOS team.", "feedback": feedback_dict(item)}
+
+
+@app.get(f"{API}/admin/feedback")
+def admin_feedback(actor: User = Depends(require_permissions("admin.feedback.read")), db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+    rows = db.scalars(select(Feedback).where(Feedback.school_id == actor.school_id).order_by(Feedback.created_at.desc()).limit(100)).all()
+    return [feedback_dict(item) for item in rows]
+
+
+@app.patch(f"{API}/admin/feedback/{{feedback_id}}", dependencies=[Depends(require_csrf)])
+def update_feedback(feedback_id: str, payload: dict[str, Any], request: Request, actor: User = Depends(require_permissions("admin.feedback.read")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    item = db.get(Feedback, feedback_id)
+    if not item or item.school_id != actor.school_id:
+        raise HTTPException(404, "Feedback not found.")
+    next_status = str(payload.get("status", "")).upper()
+    if next_status not in {"NEW", "TRIAGED", "PLANNED", "RESOLVED", "CLOSED"}:
+        raise HTTPException(422, "Feedback status is invalid.")
+    item.status = next_status
+    audit(db, actor, "FEEDBACK_STATUS_UPDATED", "FEEDBACK", item.id, {"status": next_status}, request=request)
+    db.commit()
+    return feedback_dict(item)
 
 
 @app.get(f"{API}/admin/audit-logs")
