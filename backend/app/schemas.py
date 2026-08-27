@@ -192,6 +192,63 @@ class TaskUpdate(BaseModel):
     status: Literal["TODO", "IN_PROGRESS", "BLOCKED", "COMPLETED"]
 
 
+class ResponseCommitmentCreate(BaseModel):
+    cluster_id: str
+    research_id: str | None = None
+    project_id: str | None = None
+    title: str = Field(min_length=5, max_length=240)
+    intended_outcome: str = Field(default="", max_length=4000)
+    owner_role: str = Field(min_length=2, max_length=80)
+    owner_id: str | None = None
+    priority: Literal["LOW", "MEDIUM", "HIGH", "URGENT"] = "MEDIUM"
+    due_date: str | None = Field(default=None, max_length=30)
+    next_update_date: str | None = Field(default=None, max_length=30)
+    visibility: Literal["SCHOOL", "TEAM"] = "SCHOOL"
+
+
+class ResponseCommitmentPatch(BaseModel):
+    title: str | None = Field(default=None, min_length=5, max_length=240)
+    intended_outcome: str | None = Field(default=None, max_length=4000)
+    owner_role: str | None = Field(default=None, min_length=2, max_length=80)
+    owner_id: str | None = None
+    priority: Literal["LOW", "MEDIUM", "HIGH", "URGENT"] | None = None
+    status: Literal["OPEN", "IN_PROGRESS", "BLOCKED", "COMPLETED", "DECLINED", "NOT_NOW"] | None = None
+    due_date: str | None = Field(default=None, max_length=30)
+    next_update_date: str | None = Field(default=None, max_length=30)
+    blocker: str | None = Field(default=None, max_length=4000)
+    completion_note: str | None = Field(default=None, max_length=4000)
+    evidence_reference: str | None = Field(default=None, max_length=4000)
+    visibility: Literal["SCHOOL", "TEAM"] | None = None
+    reason: str | None = Field(default=None, max_length=2000)
+
+
+class ResponseCommitmentUpdateCreate(BaseModel):
+    kind: Literal["UPDATE", "BLOCKER", "DECISION"] = "UPDATE"
+    message: str = Field(min_length=3, max_length=4000)
+    visibility: Literal["SCHOOL", "TEAM"] = "SCHOOL"
+
+
+class ResponseCommitmentTransfer(BaseModel):
+    owner_role: str = Field(min_length=2, max_length=80)
+    owner_id: str | None = None
+    reason: str = Field(min_length=3, max_length=2000)
+
+
+class ResponseCommitmentComplete(BaseModel):
+    completion_note: str = Field(min_length=3, max_length=4000)
+    evidence_reference: str = Field(default="", max_length=4000)
+
+
+class PriorityAssessmentRequest(BaseModel):
+    priority: Literal["LOW", "MEDIUM", "HIGH", "URGENT"]
+    evidence_strength: int = Field(ge=1, le=5)
+    urgency_score: int = Field(ge=1, le=5)
+    reach_score: int = Field(ge=1, le=5)
+    feasibility_score: int = Field(ge=1, le=5)
+    rationale: str = Field(min_length=3, max_length=2000)
+    review_date: str | None = Field(default=None, max_length=30)
+
+
 class FeedbackCreate(BaseModel):
     category: Literal["BROKEN", "CONFUSING", "SUGGESTION", "ACCESSIBILITY", "OTHER"]
     description: str = Field(min_length=10, max_length=4000)

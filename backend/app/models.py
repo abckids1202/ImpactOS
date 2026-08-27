@@ -140,6 +140,13 @@ class ProblemPriority(Base):
     assigned_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
     priority: Mapped[str] = mapped_column(String(20), default="MEDIUM")
     rationale: Mapped[str] = mapped_column(Text, default="")
+    evidence_strength: Mapped[int] = mapped_column(Integer, default=0)
+    urgency_score: Mapped[int] = mapped_column(Integer, default=0)
+    reach_score: Mapped[int] = mapped_column(Integer, default=0)
+    feasibility_score: Mapped[int] = mapped_column(Integer, default=0)
+    reviewed_by: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id"), nullable=True)
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    review_date: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
     __table_args__ = (UniqueConstraint("cluster_id", "school_id", name="uq_problem_priority_school"),)
@@ -150,6 +157,7 @@ class Evidence(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     school_id: Mapped[str] = mapped_column(ForeignKey("schools.id"), index=True)
     author_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    report_id: Mapped[Optional[str]] = mapped_column(ForeignKey("problem_reports.id"), nullable=True, index=True)
     cluster_id: Mapped[Optional[str]] = mapped_column(ForeignKey("problem_clusters.id"), nullable=True, index=True)
     research_id: Mapped[Optional[str]] = mapped_column(ForeignKey("research_projects.id"), nullable=True, index=True)
     project_id: Mapped[Optional[str]] = mapped_column(ForeignKey("impact_projects.id"), nullable=True, index=True)
@@ -289,6 +297,43 @@ class ProjectTask(Base):
     status: Mapped[str] = mapped_column(String(30), default="TODO")
     priority: Mapped[str] = mapped_column(String(20), default="MEDIUM")
     due_date: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+
+
+class ResponseCommitment(Base):
+    __tablename__ = "response_commitments"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    school_id: Mapped[str] = mapped_column(ForeignKey("schools.id"), index=True)
+    cluster_id: Mapped[str] = mapped_column(ForeignKey("problem_clusters.id"), index=True)
+    research_id: Mapped[Optional[str]] = mapped_column(ForeignKey("research_projects.id"), nullable=True, index=True)
+    project_id: Mapped[Optional[str]] = mapped_column(ForeignKey("impact_projects.id"), nullable=True, index=True)
+    title: Mapped[str] = mapped_column(String(240))
+    intended_outcome: Mapped[str] = mapped_column(Text, default="")
+    owner_role: Mapped[str] = mapped_column(String(80))
+    owner_id: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    assigned_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    status: Mapped[str] = mapped_column(String(30), default="OPEN", index=True)
+    priority: Mapped[str] = mapped_column(String(20), default="MEDIUM")
+    due_date: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    next_update_date: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    blocker: Mapped[str] = mapped_column(Text, default="")
+    completion_note: Mapped[str] = mapped_column(Text, default="")
+    evidence_reference: Mapped[str] = mapped_column(Text, default="")
+    visibility: Mapped[str] = mapped_column(String(30), default="SCHOOL")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class ResponseCommitmentUpdate(Base):
+    __tablename__ = "response_commitment_updates"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    school_id: Mapped[str] = mapped_column(ForeignKey("schools.id"), index=True)
+    commitment_id: Mapped[str] = mapped_column(ForeignKey("response_commitments.id"), index=True)
+    author_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    kind: Mapped[str] = mapped_column(String(30), default="UPDATE")
+    message: Mapped[str] = mapped_column(Text)
+    visibility: Mapped[str] = mapped_column(String(30), default="SCHOOL")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
 class Metric(Base):

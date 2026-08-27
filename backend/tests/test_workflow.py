@@ -2,13 +2,20 @@ import pytest
 from uuid import uuid4
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app.main import _RATE_LIMITS, app
 
 
 @pytest.fixture
 def client():
     with TestClient(app) as value:
         yield value
+
+
+@pytest.fixture(autouse=True)
+def reset_rate_limits():
+    _RATE_LIMITS.clear()
+    yield
+    _RATE_LIMITS.clear()
 
 
 def csrf_headers(client: TestClient) -> dict[str, str]:
@@ -78,6 +85,42 @@ def test_sensitive_problem_never_enters_public_feed(client: TestClient) -> None:
     assert submitted.json()["report"]["status"] == "PRIVATE_REVIEW"
     clusters = client.get("/api/v1/problem-clusters").json()
     assert all(item["title"] != "Private bullying concern" for item in clusters)
+
+
+def test_report_follow_up_correction_and_withdrawal_are_tracked(client: TestClient) -> None:
+    login(client, "student@demo.local")
+    created = client.post(
+        "/api/v1/problem-reports",
+        headers=csrf_headers(client),
+        json={
+            "title": "Follow-up evidence test report",
+            "description": "Students regularly cannot find a quiet seat in the library before lunch on school days.",
+            "affected_group": "Grade 10 students",
+            "scope": "Library",
+            "category": "CAMPUS",
+            "visibility": "SCHOOL_ANONYMOUS",
+        },
+    )
+    assert created.status_code == 200, created.text
+    report_id = created.json()["report"]["id"]
+    assert client.post(f"/api/v1/problem-reports/{report_id}/submit", headers=csrf_headers(client)).status_code == 200
+    added = client.post(
+        f"/api/v1/problem-reports/{report_id}/follow-up-evidence",
+        headers=csrf_headers(client),
+        json={"source": "Second observation sheet", "relevance": "The same pattern occurred on another school day.", "visibility": "TEAM"},
+    )
+    assert added.status_code == 200, added.text
+    assert added.json()["follow_up_evidence"][0]["source"] == "Second observation sheet"
+    corrected = client.post(
+        f"/api/v1/problem-reports/{report_id}/request-correction",
+        headers=csrf_headers(client),
+        json={"decision": "REQUEST_CORRECTION", "reason": "I need to clarify the observation period before publication."},
+    )
+    assert corrected.status_code == 200, corrected.text
+    assert corrected.json()["status"] == "CHANGES_REQUESTED"
+    withdrawn = client.post(f"/api/v1/problem-reports/{report_id}/withdraw", headers=csrf_headers(client))
+    assert withdrawn.status_code == 200, withdrawn.text
+    assert withdrawn.json()["status"] == "WITHDRAWN"
 
 
 def test_anonymous_survey_response_and_safe_analysis(client: TestClient) -> None:

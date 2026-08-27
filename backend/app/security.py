@@ -34,15 +34,15 @@ ROLE_ALIASES = {
 }
 
 ROLE_PERMISSIONS: dict[str, set[str]] = {
-    "STUDENT_CONTRIBUTOR": {"app.access", "profile.read_own", "profile.update_own", "problem.read_public_school", "problem_report.create", "problem.signal", "problem.follow", "task.read_assigned", "task.update_assigned", "feedback.submit"},
-    "STUDENT_PROJECT_LEADER": {"app.access", "profile.read_own", "profile.update_own", "problem.read_public_school", "problem_report.create", "problem.signal", "problem.follow", "research.create", "research.read_assigned", "research.manage_assigned", "research.submit_review", "research_project.manage", "impact.read_assigned", "task.read_assigned", "task.update_assigned", "feedback.submit"},
-    "MENTOR": {"app.access", "profile.read_own", "profile.update_own", "problem.read_public_school", "research.read_assigned", "mentor.review", "impact.read_assigned", "task.read_assigned", "feedback.submit"},
-    "OSIS_REVIEWER": {"app.access", "profile.read_own", "profile.update_own", "problem.read_public_school", "problem.signal", "osis.review", "osis.priority_manage", "osis.official_update_manage", "feedback.submit"},
-    "MODERATOR": {"app.access", "profile.read_own", "profile.update_own", "problem.read_public_school", "moderation.review", "moderation.restricted_read", "moderation.cluster_manage", "feedback.submit"},
+    "STUDENT_CONTRIBUTOR": {"app.access", "profile.read_own", "profile.update_own", "problem.read_public_school", "problem_report.create", "problem.signal", "problem.follow", "task.read_assigned", "task.update_assigned", "response_commitment.read", "response_commitment.manage_assigned", "feedback.submit"},
+    "STUDENT_PROJECT_LEADER": {"app.access", "profile.read_own", "profile.update_own", "problem.read_public_school", "problem_report.create", "problem.signal", "problem.follow", "research.create", "research.read_assigned", "research.manage_assigned", "research.submit_review", "research_project.manage", "impact.read_assigned", "task.read_assigned", "task.update_assigned", "response_commitment.read", "response_commitment.manage_assigned", "feedback.submit"},
+    "MENTOR": {"app.access", "profile.read_own", "profile.update_own", "problem.read_public_school", "research.read_assigned", "mentor.review", "impact.read_assigned", "task.read_assigned", "task.update_assigned", "response_commitment.read", "response_commitment.create", "response_commitment.manage", "response_commitment.manage_assigned", "problem.priority_assess", "feedback.submit"},
+    "OSIS_REVIEWER": {"app.access", "profile.read_own", "profile.update_own", "problem.read_public_school", "problem.signal", "osis.review", "osis.priority_manage", "osis.official_update_manage", "response_commitment.read", "response_commitment.create", "response_commitment.manage", "response_commitment.manage_assigned", "problem.priority_assess", "feedback.submit"},
+    "MODERATOR": {"app.access", "profile.read_own", "profile.update_own", "problem.read_public_school", "moderation.review", "moderation.restricted_read", "moderation.cluster_manage", "response_commitment.read", "feedback.submit"},
     "ADMINISTRATOR": {
         "app.access", "profile.read_own", "profile.update_own", "admin.members.read", "admin.members.manage",
         "admin.invitations.manage", "admin.audit.read", "problem.read_public_school", "problem_report.create", "problem.signal", "problem.follow",
-        "research.create", "research.read_assigned", "research.manage_assigned", "research.submit_review", "research_project.manage", "mentor.review", "osis.review", "osis.priority_manage", "osis.official_update_manage", "moderation.review", "moderation.restricted_read", "moderation.cluster_manage", "impact.read_assigned", "task.read_assigned", "task.update_assigned", "feedback.submit", "admin.feedback.read",
+        "research.create", "research.read_assigned", "research.manage_assigned", "research.submit_review", "research_project.manage", "mentor.review", "osis.review", "osis.priority_manage", "osis.official_update_manage", "moderation.review", "moderation.restricted_read", "moderation.cluster_manage", "impact.read_assigned", "task.read_assigned", "task.update_assigned", "response_commitment.read", "response_commitment.create", "response_commitment.manage", "response_commitment.manage_assigned", "problem.priority_assess", "feedback.submit", "admin.feedback.read",
     },
 }
 

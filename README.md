@@ -19,11 +19,16 @@ This repository now contains the closed-alpha implementation baseline and the pl
 - Synthetic seed data also retains the original golden path: Assessment Workload Concentration → Deadline research → Shared Assessment Calendar → observed change.
 - Pilar Civic Lab UI foundation: semantic light/dark themes, responsive app shell with mobile navigation, sticky public navigation, editorial public styling, accessible focus states, reduced-motion support, loading/empty/error surfaces, and consistent status/button/form treatments.
 - Workspace utilities: authorized record search with keyboard shortcuts (`Ctrl/Cmd+K` or `/`), offline status notice, back-to-top control, in-app feedback submission, and an administrator feedback triage queue. Feedback stores safe context only and never includes passwords, session tokens, or private record contents.
+- ImpactOS Response Loop: `Report → Problem Cluster → Evidence → Decision → Commitment → Update → Result → Next Action`, with a visible next-step panel and safe problem timeline.
+- Problem-to-Action Ledger: published problems expose accountable ownership, next-update dates, intended outcomes, response status, and completion evidence without using likes, votes, popularity, or opaque AI scores.
+- Two-lane unified work view at `/app/tasks`: project tasks remain separate from school response commitments, while owners and managers can post updates and complete commitments only with a completion note or evidence reference.
+- Response commitment API and migration: `ResponseCommitment`, member-visible updates, audited ownership transfers/status changes, `NOT_NOW` reason and review-date validation, evidence-led priority assessments, and in-app due/reminder/quiet attention states.
+- Synthetic canteen response commitment seeded for the closed alpha; existing problem clusters are never assigned invented owners during migration and remain in the review queue until a real owner is recorded.
 - Planning and discovery artifacts in `docs/`.
 
 ### UI polish boundary
 
-This phase intentionally improves the product surface while preserving the existing API-backed workflows and permission model. The repository does not yet include production file storage, so drag-and-drop evidence uploads, upload progress, offline write queues, and draft autosave remain deferred. Full notification preferences, saved/recent records, command-palette actions beyond search, PWA installation, localization, and automated browser visual regression are also follow-on work for the closed alpha.
+This phase intentionally delivers the Response Loop vertical slice while preserving the existing API-backed workflows and permission model. Friction Radar, representation/evidence-coverage warnings, school response templates, student civic portfolios, and cross-school learning remain sequenced follow-on work. The repository also does not yet include production file storage, so drag-and-drop evidence uploads, upload progress, offline write queues, and draft autosave remain deferred. Full notification preferences, saved/recent records, command-palette actions beyond search, PWA installation, localization, and automated browser visual regression are also follow-on work for the closed alpha.
 
 ## Run locally
 
@@ -69,6 +74,10 @@ There is no open registration. An administrator creates a single-use invitation 
 
 Public API endpoints are `GET /api/v1/public/site`, `GET /api/v1/public/faq`, `GET /api/v1/public/impact-stories`, and `GET /api/v1/public/impact-stories/{slug}`.
 
+### Response Loop endpoints
+
+The closed-alpha workflow exposes problem browsing/detail/timeline/work under `/api/v1/problems`, plus response commitment creation, updates, transfers, completion, the unified work composition, and priority assessment. See the generated OpenAPI document at `/docs` for request and permission details. Project tasks remain in their existing table and endpoints; `/api/v1/work` composes both lanes without replacing them.
+
 ## Demo accounts
 
 All demo accounts use password `demo1234`:
@@ -110,5 +119,7 @@ The first backend start creates `impactos.db` in the current working directory. 
 ## Architecture notes
 
 Routes validate input and delegate state changes through explicit transition maps. Every high-value mutation records an audit event. Restricted reports are filtered server-side, and anonymous survey responses deliberately do not store a researcher-visible identity. AI behavior is currently represented by deterministic, explainable demo suggestions; the manual workflow never depends on an AI provider.
+
+Response commitments are intentionally separate from project execution tasks. Managers can see school-level response work, while members only see assigned or school-visible records; overdue attention is a quiet queue state and is never attached publicly to an individual.
 
 This is a closed-alpha baseline, not a production deployment. The next safe action is to run the seeded golden path, execute the automated checks, and then use the discovery pack to confirm Pilar's safeguarding, authority, authentication, retention, contact, verified-email, and public-publication decisions.

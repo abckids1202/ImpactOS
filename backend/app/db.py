@@ -63,6 +63,18 @@ def ensure_schema() -> None:
         "reviews": {
             "reviewed_version": "INTEGER",
         },
+        "problem_priorities": {
+            "evidence_strength": "INTEGER NOT NULL DEFAULT 0",
+            "urgency_score": "INTEGER NOT NULL DEFAULT 0",
+            "reach_score": "INTEGER NOT NULL DEFAULT 0",
+            "feasibility_score": "INTEGER NOT NULL DEFAULT 0",
+            "reviewed_by": "VARCHAR(36)",
+            "reviewed_at": "DATETIME",
+            "review_date": "VARCHAR(30)",
+        },
+        "evidence_items": {
+            "report_id": "VARCHAR(36)",
+        },
     }
     inspector = inspect(engine)
     with engine.begin() as connection:

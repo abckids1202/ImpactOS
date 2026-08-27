@@ -39,7 +39,7 @@ export const APP_ROUTES: AppRouteDefinition[] = [
   { id: "reports", path: APP_PATHS.reports, label: "My reports", icon: "▤", permission: "problem_report.create", group: "workspace", sidebar: true, mobile: true },
   { id: "research", path: APP_PATHS.research, label: "Research", icon: "⌁", permission: "research.read_assigned", group: "workspace", sidebar: true, mobile: true },
   { id: "projects", path: APP_PATHS.projects, label: "Impact projects", icon: "↗", permission: "impact.read_assigned", group: "workspace", sidebar: true, mobile: true },
-  { id: "tasks", path: APP_PATHS.tasks, label: "My tasks", icon: "✓", permission: "task.read_assigned", group: "workspace", sidebar: true, mobile: true },
+  { id: "tasks", path: APP_PATHS.tasks, label: "My work", icon: "✓", permission: "task.read_assigned", group: "workspace", sidebar: true, mobile: true },
   { id: "mentor", path: APP_PATHS.mentor, label: "Review queue", icon: "▣", permission: "mentor.review", group: "review", sidebar: true, mobile: true },
   { id: "osis", path: APP_PATHS.osis, label: "School priorities", icon: "✦", permission: "osis.review", group: "review", sidebar: true, mobile: true },
   { id: "moderation", path: APP_PATHS.moderation, label: "Moderation queue", icon: "⚑", permission: "moderation.review", group: "review", sidebar: true, mobile: true },

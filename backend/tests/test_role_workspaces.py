@@ -141,3 +141,106 @@ def test_member_feedback_is_safe_and_admin_managed(client: TestClient) -> None:
     updated = client.patch(f"/api/v1/admin/feedback/{feedback_id}", headers=csrf_headers(client), json={"status": "TRIAGED"})
     assert updated.status_code == 200
     assert updated.json()["status"] == "TRIAGED"
+
+
+def test_response_loop_commitment_is_visible_and_requires_completion_evidence(client: TestClient) -> None:
+    login(client, "osis@demo.local")
+    detail = client.get("/api/v1/problems/cluster-canteen")
+    assert detail.status_code == 200
+    assert detail.json()["response_commitments"]
+    assert detail.json()["response_loop"]["next_step"]
+
+    created = client.post(
+        "/api/v1/response-commitments",
+        headers=csrf_headers(client),
+        json={
+            "cluster_id": "cluster-canteen",
+            "title": "Confirm the next canteen pilot decision",
+            "intended_outcome": "Publish a safe decision after the baseline is reviewed.",
+            "owner_role": "OSIS_REVIEWER",
+            "owner_id": "user-osis",
+            "priority": "HIGH",
+            "due_date": "2026-09-10",
+            "next_update_date": "2026-09-03",
+        },
+    )
+    assert created.status_code == 200, created.text
+    commitment_id = created.json()["id"]
+    assert created.json()["status"] == "OPEN"
+    assert client.post(f"/api/v1/response-commitments/{commitment_id}/complete", headers=csrf_headers(client), json={"completion_note": "The decision was recorded for the pilot team."}).status_code == 200
+
+    client.post("/api/v1/auth/logout", headers=csrf_headers(client))
+    login(client, "student@demo.local")
+    work = client.get("/api/v1/work")
+    assert work.status_code == 200
+    assert all(item["id"] != commitment_id for item in work.json()["items"])
+
+
+def test_priority_assessment_and_not_now_guard_are_explicit(client: TestClient) -> None:
+    login(client, "osis@demo.local")
+    assessed = client.post(
+        "/api/v1/problems/cluster-assessment/priority-assessment",
+        headers=csrf_headers(client),
+        json={"priority": "HIGH", "evidence_strength": 4, "urgency_score": 3, "reach_score": 5, "feasibility_score": 4, "rationale": "The evidence is repeated and the school can test a practical response.", "review_date": "2026-09-12"},
+    )
+    assert assessed.status_code == 200, assessed.text
+    assert assessed.json()["priority_assessment"]["evidence_strength"] == 4
+    assert assessed.json()["priority_assessment"]["reach_score"] == 5
+
+    created = client.post(
+        "/api/v1/response-commitments",
+        headers=csrf_headers(client),
+        json={"cluster_id": "cluster-assessment", "title": "Review the assessment calendar option", "owner_role": "OSIS_REVIEWER", "owner_id": "user-osis", "next_update_date": "2026-09-04"},
+    )
+    assert created.status_code == 200, created.text
+    commitment_id = created.json()["id"]
+    missing_reason = client.patch(f"/api/v1/response-commitments/{commitment_id}", headers=csrf_headers(client), json={"status": "NOT_NOW"})
+    assert missing_reason.status_code == 422
+    changed = client.patch(f"/api/v1/response-commitments/{commitment_id}", headers=csrf_headers(client), json={"status": "NOT_NOW", "reason": "The school calendar is being finalized first.", "next_update_date": "2026-09-20"})
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["status"] == "NOT_NOW"
+
+
+def test_unified_work_and_timeline_keep_the_two_lanes_distinct(client: TestClient) -> None:
+    login(client, "osis@demo.local")
+    work = client.get("/api/v1/work")
+    assert work.status_code == 200
+    assert work.json()["manager_view"] is True
+    assert any(item["type"] == "RESPONSE_COMMITMENT" for item in work.json()["items"])
+    cluster_work = client.get("/api/v1/problems/cluster-canteen/work")
+    assert cluster_work.status_code == 200
+    assert cluster_work.json()["commitments"]
+    assert all(item["type"] == "PROJECT_TASK" for item in cluster_work.json()["project_tasks"])
+    timeline = client.get("/api/v1/problems/cluster-canteen/timeline")
+    assert timeline.status_code == 200
+    assert any(item["type"] in {"COMMITMENT_UPDATE", "COMMITMENT_STATUS"} for item in timeline.json()["items"])
+
+
+def test_team_commitment_details_do_not_leak_into_student_timeline(client: TestClient) -> None:
+    login(client, "osis@demo.local")
+    created = client.post(
+        "/api/v1/response-commitments",
+        headers=csrf_headers(client),
+        json={
+            "cluster_id": "cluster-canteen",
+            "title": "Restricted response handoff",
+            "intended_outcome": "Coordinate a reviewer-only decision.",
+            "owner_role": "MENTOR",
+            "owner_id": "user-mentor",
+            "visibility": "TEAM",
+            "next_update_date": "2026-09-15",
+        },
+    )
+    assert created.status_code == 200, created.text
+    commitment_id = created.json()["id"]
+    update = client.post(
+        f"/api/v1/response-commitments/{commitment_id}/updates",
+        headers=csrf_headers(client),
+        json={"kind": "DECISION", "message": "Reviewer-only handoff detail.", "visibility": "TEAM"},
+    )
+    assert update.status_code == 200, update.text
+    client.post("/api/v1/auth/logout", headers=csrf_headers(client))
+    login(client, "student@demo.local")
+    timeline = client.get("/api/v1/problems/cluster-canteen/timeline")
+    assert timeline.status_code == 200
+    assert all(item["message"] != "Reviewer-only handoff detail." for item in timeline.json()["items"])

@@ -30,8 +30,92 @@ export interface Cluster {
   followed?: boolean;
   priority?: string | null;
   priority_rationale?: string | null;
+  priority_assessment?: PriorityAssessment | null;
+  response_commitments: ResponseCommitment[];
+  response_loop: ResponseLoop;
+  timeline: TimelineItem[];
+  needs_response?: boolean;
   created_at?: string;
   updated_at?: string;
+}
+
+export interface PriorityAssessment {
+  priority: string;
+  evidence_strength: number;
+  urgency_score: number;
+  reach_score: number;
+  feasibility_score: number;
+  rationale: string;
+  reviewed_by?: string | null;
+  review_date?: string | null;
+  reviewed_at?: string | null;
+}
+
+export interface ResponseCommitment {
+  id: string;
+  type: "RESPONSE_COMMITMENT";
+  title: string;
+  intended_outcome: string;
+  cluster_id: string;
+  cluster_title?: string | null;
+  research_id?: string | null;
+  project_id?: string | null;
+  owner_role: string;
+  owner_id?: string | null;
+  owner_name?: string | null;
+  status: string;
+  priority: string;
+  due_date?: string | null;
+  next_update_date?: string | null;
+  blocker?: string;
+  completion_note?: string;
+  evidence_reference?: string;
+  visibility: string;
+  is_overdue?: boolean;
+  is_stale?: boolean;
+  reminder_state?: string | null;
+  reminder_message?: string | null;
+  updates?: { id: string; kind: string; message: string; visibility: string; created_at?: string | null }[];
+  href: string;
+}
+
+export interface ProjectTask {
+  id: string;
+  type: "PROJECT_TASK";
+  title: string;
+  status: string;
+  priority: string;
+  due_date?: string | null;
+  owner_id?: string | null;
+  project_id: string;
+  cluster_id?: string | null;
+  cluster_title?: string | null;
+  href: string;
+  is_overdue?: boolean;
+  is_stale?: boolean;
+  reminder_state?: string | null;
+}
+
+export type WorkItem = ResponseCommitment | ProjectTask;
+
+export interface ResponseLoop {
+  next_step: string;
+  needs_response: boolean;
+  commitment_id?: string | null;
+  status?: string | null;
+  owner_role?: string | null;
+  owner_name?: string | null;
+  next_update_date?: string | null;
+  is_stale: boolean;
+}
+
+export interface TimelineItem {
+  id: string;
+  type: string;
+  title: string;
+  message: string;
+  status?: string;
+  created_at?: string | null;
 }
 
 export interface Report {
@@ -46,6 +130,7 @@ export interface Report {
   cluster_id?: string | null;
   author: string;
   sensitivity_reason?: string | null;
+  follow_up_evidence?: Evidence[];
 }
 
 export interface Evidence {

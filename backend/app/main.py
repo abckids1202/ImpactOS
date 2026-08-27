@@ -8,7 +8,7 @@ import secrets
 import time
 from collections import defaultdict, deque
 from threading import Lock
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from statistics import mean, median
 from typing import Any
 from uuid import uuid4
@@ -40,6 +40,8 @@ from .models import (
     ProblemSignal,
     PublicImpactStory,
     ProjectTask,
+    ResponseCommitment,
+    ResponseCommitmentUpdate,
     Invitation,
     InvitationRole,
     Membership,
@@ -81,6 +83,12 @@ from .schemas import (
     PasswordForgotRequest,
     PasswordResetRequest,
     PriorityRequest,
+    PriorityAssessmentRequest,
+    ResponseCommitmentComplete,
+    ResponseCommitmentCreate,
+    ResponseCommitmentPatch,
+    ResponseCommitmentTransfer,
+    ResponseCommitmentUpdateCreate,
     RoleAssignmentRequest,
     SurveyCreate,
     SurveyQuestionCreate,
@@ -289,6 +297,193 @@ def notify(db: Session, user_id: str | None, title: str, message: str) -> None:
         db.add(Notification(id=new_id(), user_id=user_id, title=title, message=message))
 
 
+RESPONSE_COMMITMENT_TRANSITIONS = {
+    "OPEN": {"IN_PROGRESS", "BLOCKED", "COMPLETED", "DECLINED", "NOT_NOW"},
+    "IN_PROGRESS": {"OPEN", "BLOCKED", "COMPLETED", "DECLINED", "NOT_NOW"},
+    "BLOCKED": {"OPEN", "IN_PROGRESS", "COMPLETED", "DECLINED", "NOT_NOW"},
+    "NOT_NOW": {"OPEN", "IN_PROGRESS", "COMPLETED"},
+    "DECLINED": {"OPEN", "IN_PROGRESS"},
+    "COMPLETED": set(),
+}
+RESPONSE_COMMITMENT_TERMINAL = {"COMPLETED", "DECLINED"}
+RESPONSE_VISIBLE_CLUSTER_STATES = {"VALIDATED", "UNDER_INVESTIGATION", "ACTION_PLANNED", "ACTION_UNDERWAY", "RESOLVED", "IMPACT_MEASURED", "CLOSED"}
+
+
+def parse_day(value: str | None, field_name: str) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"{field_name} must use YYYY-MM-DD format.") from exc
+
+
+def school_days_between(start: date, end: date) -> int:
+    """Return weekday count from start up to end, excluding the end date."""
+    if end <= start:
+        return 0
+    current = start
+    count = 0
+    while current < end:
+        current += timedelta(days=1)
+        if current.weekday() < 5:
+            count += 1
+    return count
+
+
+def commitment_reminder(item: ResponseCommitment) -> tuple[str, str] | None:
+    if item.status in RESPONSE_COMMITMENT_TERMINAL:
+        return None
+    today = date.today()
+    due = parse_day(item.due_date, "due_date")
+    update_due = parse_day(item.next_update_date, "next_update_date")
+    candidates = [(due, "Action due") if due else None, (update_due, "Status update due") if update_due else None]
+    candidates = [candidate for candidate in candidates if candidate]
+    if not candidates:
+        return None
+    target, label = min(candidates, key=lambda candidate: candidate[0])
+    if target < today:
+        if school_days_between(target, today) < 3:
+            return None
+        return "OVERDUE", f"{label} for {item.title} was due on {target.isoformat()}. Add an update or revise the commitment."
+    if target == today:
+        return "DUE_TODAY", f"{label} for {item.title} is due today."
+    if school_days_between(today, target) <= 3:
+        return "DUE_SOON", f"{label} for {item.title} is due on {target.isoformat()}."
+    return None
+
+
+def commitment_scope(db: Session, actor: User, item: ResponseCommitment) -> tuple[bool, bool]:
+    manager = has_active_role(db, actor, "MENTOR", "OSIS", "ADMIN")
+    return actor.id == item.owner_id or manager, manager
+
+
+def validate_commitment_links(db: Session, actor: User, cluster_id: str, research_id: str | None, project_id: str | None) -> None:
+    if research_id:
+        research = db.get(ResearchProject, research_id)
+        if not research or research.school_id != actor.school_id or research.cluster_id != cluster_id:
+            raise HTTPException(status_code=404, detail="Linked research workspace not found.")
+    if project_id:
+        project = db.get(ImpactProject, project_id)
+        if not project or project.school_id != actor.school_id or project.cluster_id != cluster_id:
+            raise HTTPException(status_code=404, detail="Linked impact project not found.")
+
+
+def validate_commitment_owner(db: Session, actor: User, owner_role: str, owner_id: str | None) -> tuple[str, User | None]:
+    role = owner_role.strip().upper().replace(" ", "_")
+    role = normalize_role(role)
+    owner = None
+    if owner_id:
+        owner = db.get(User, owner_id)
+        if not owner or owner.school_id != actor.school_id or not owner.active or getattr(owner, "status", "ACTIVE") != "ACTIVE":
+            raise HTTPException(status_code=404, detail="Commitment owner not found.")
+        if role in ROLE_DETAILS and role not in active_role_codes(db, owner):
+            raise HTTPException(status_code=422, detail="The selected owner does not hold the accountable role.")
+    return role, owner
+
+
+def commitment_dict(db: Session, item: ResponseCommitment, actor: User, include_updates: bool = True) -> dict[str, Any]:
+    owner = db.get(User, item.owner_id) if item.owner_id else None
+    can_manage, manager = commitment_scope(db, actor, item)
+    reminder = commitment_reminder(item)
+    updates = db.scalars(select(ResponseCommitmentUpdate).where(ResponseCommitmentUpdate.commitment_id == item.id).order_by(ResponseCommitmentUpdate.created_at.desc()).limit(8)).all() if include_updates else []
+    visible_updates = [update for update in updates if update.visibility == "SCHOOL" or can_manage]
+    cluster = db.get(ProblemCluster, item.cluster_id)
+    return {
+        "id": item.id,
+        "type": "RESPONSE_COMMITMENT",
+        "title": item.title,
+        "intended_outcome": item.intended_outcome,
+        "cluster_id": item.cluster_id,
+        "cluster_title": cluster.title if cluster else None,
+        "research_id": item.research_id,
+        "project_id": item.project_id,
+        "owner_role": item.owner_role,
+        "owner_id": item.owner_id,
+        "owner_name": owner.display_name if owner else None,
+        "status": item.status,
+        "priority": item.priority,
+        "due_date": item.due_date,
+        "next_update_date": item.next_update_date,
+        "blocker": item.blocker if can_manage else "",
+        "completion_note": item.completion_note if can_manage else "",
+        "evidence_reference": item.evidence_reference if can_manage else "",
+        "visibility": item.visibility,
+        "is_overdue": bool(reminder and reminder[0] == "OVERDUE") if (can_manage or manager) else False,
+        "is_stale": bool(reminder and reminder[0] == "OVERDUE") if (can_manage or manager) else False,
+        "reminder_state": reminder[0] if reminder and (can_manage or manager) else None,
+        "reminder_message": reminder[1] if reminder and (can_manage or manager) else None,
+        "updates": [{"id": update.id, "kind": update.kind, "message": update.message, "visibility": update.visibility, "created_at": dt(update.created_at)} for update in visible_updates],
+        "href": f"/app/problems/{item.cluster_id}",
+        "created_at": dt(item.created_at),
+        "updated_at": dt(item.updated_at),
+    }
+
+
+def cluster_timeline(db: Session, cluster: ProblemCluster, actor: User) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    status_events = db.scalars(select(StatusEvent).where(StatusEvent.entity_type == "PROBLEM_CLUSTER", StatusEvent.entity_id == cluster.id).order_by(StatusEvent.created_at.desc()).limit(40)).all()
+    for event in status_events:
+        events.append({"id": event.id, "type": "STATUS", "title": f"Problem moved to {event.to_status.replace('_', ' ').title()}", "message": event.reason or "Workflow status updated.", "status": event.to_status, "created_at": dt(event.created_at)})
+    official_updates = db.scalars(select(OfficialUpdate).where(OfficialUpdate.cluster_id == cluster.id, OfficialUpdate.status == "PUBLISHED").order_by(OfficialUpdate.created_at.desc()).limit(30)).all()
+    for update in official_updates:
+        events.append({"id": update.id, "type": "OFFICIAL_UPDATE", "title": "Official update", "message": update.message, "status": update.status, "created_at": dt(update.created_at)})
+    commitments = db.scalars(select(ResponseCommitment).where(ResponseCommitment.cluster_id == cluster.id).order_by(ResponseCommitment.created_at.desc())).all()
+    for commitment in commitments:
+        can_see, _ = commitment_scope(db, actor, commitment)
+        if commitment.visibility != "SCHOOL" and not can_see:
+            continue
+        commitment_events = db.scalars(select(StatusEvent).where(StatusEvent.entity_type == "RESPONSE_COMMITMENT", StatusEvent.entity_id == commitment.id).order_by(StatusEvent.created_at.desc()).limit(20)).all()
+        for event in commitment_events:
+            events.append({"id": event.id, "type": "COMMITMENT_STATUS", "title": f"Commitment moved to {event.to_status.replace('_', ' ').title()}", "message": event.reason or "Response commitment status updated.", "status": event.to_status, "created_at": dt(event.created_at)})
+        updates = db.scalars(select(ResponseCommitmentUpdate).where(ResponseCommitmentUpdate.commitment_id == commitment.id).order_by(ResponseCommitmentUpdate.created_at.desc()).limit(20)).all()
+        for update in updates:
+            if update.visibility == "SCHOOL" or can_see:
+                events.append({"id": update.id, "type": "COMMITMENT_UPDATE", "title": "Response commitment update", "message": update.message, "status": commitment.status, "created_at": dt(update.created_at)})
+    if not events:
+        events.append({"id": f"current-{cluster.id}", "type": "CURRENT_STATUS", "title": f"Problem is {cluster.status.replace('_', ' ').title()}", "message": "This is the current recorded problem stage.", "status": cluster.status, "created_at": dt(cluster.updated_at)})
+    return sorted(events, key=lambda event: event.get("created_at") or "", reverse=True)[:60]
+
+
+def cluster_response_loop(db: Session, cluster: ProblemCluster, actor: User) -> dict[str, Any]:
+    all_commitments = db.scalars(select(ResponseCommitment).where(ResponseCommitment.cluster_id == cluster.id).order_by(ResponseCommitment.updated_at.desc())).all()
+    commitments = [item for item in all_commitments if item.visibility == "SCHOOL" or commitment_scope(db, actor, item)[0]]
+    research = db.scalar(select(ResearchProject).where(ResearchProject.cluster_id == cluster.id).order_by(ResearchProject.updated_at.desc()))
+    active = next((item for item in commitments if item.status not in RESPONSE_COMMITMENT_TERMINAL), None)
+    selected = active or (commitments[0] if commitments else None)
+    if selected and selected.status == "NOT_NOW":
+        next_step = "Revisit the documented decision on the next-update date."
+    elif active:
+        next_step = "Follow the response commitment and wait for the next update."
+    elif research:
+        next_step = "Continue the linked investigation and record what the evidence supports."
+    else:
+        next_step = "A response owner or investigation still needs to be recorded."
+    can_see_selected = selected and (selected.visibility == "SCHOOL" or commitment_scope(db, actor, selected)[0])
+    return {
+        "next_step": next_step,
+        "needs_response": not bool(commitments or research),
+        "commitment_id": selected.id if can_see_selected else None,
+        "status": selected.status if can_see_selected else None,
+        "owner_role": selected.owner_role if can_see_selected else None,
+        "owner_name": (db.get(User, selected.owner_id).display_name if can_see_selected and selected and selected.owner_id and db.get(User, selected.owner_id) else None),
+        "next_update_date": selected.next_update_date if can_see_selected else None,
+        "is_stale": bool(can_see_selected and commitment_reminder(selected) and commitment_reminder(selected)[0] == "OVERDUE"),
+    }
+
+
+def ensure_commitment_reminders(db: Session, actor: User, commitments: list[ResponseCommitment]) -> None:
+    today = date.today()
+    for item in commitments:
+        reminder = commitment_reminder(item)
+        if not reminder or not item.owner_id:
+            continue
+        message = reminder[1]
+        existing = db.scalar(select(Notification).where(Notification.user_id == item.owner_id, Notification.title == "Response commitment reminder", Notification.message == message, Notification.created_at >= datetime.combine(today, datetime.min.time())))
+        if not existing:
+            db.add(Notification(id=new_id(), user_id=item.owner_id, title="Response commitment reminder", message=message))
+
+
 def has_active_role(db: Session, user: User, *roles: str) -> bool:
     allowed = {normalize_role(role) for role in roles}
     return bool(allowed.intersection(active_role_codes(db, user)))
@@ -325,9 +520,10 @@ def transition(db: Session, actor: User, entity: Any, entity_type: str, new_stat
 
 
 PROBLEM_TRANSITIONS = {
-    "DRAFT": {"MODERATION_REVIEW", "PRIVATE_REVIEW"},
-    "MODERATION_REVIEW": {"PUBLISHED", "PRIVATE_REVIEW", "CHANGES_REQUESTED", "ARCHIVED"},
-    "PRIVATE_REVIEW": {"PUBLISHED", "ARCHIVED"},
+    "DRAFT": {"MODERATION_REVIEW", "PRIVATE_REVIEW", "WITHDRAWN"},
+    "MODERATION_REVIEW": {"PUBLISHED", "PRIVATE_REVIEW", "CHANGES_REQUESTED", "ARCHIVED", "WITHDRAWN"},
+    "PRIVATE_REVIEW": {"PUBLISHED", "CHANGES_REQUESTED", "ARCHIVED", "WITHDRAWN"},
+    "CHANGES_REQUESTED": {"MODERATION_REVIEW", "PRIVATE_REVIEW", "WITHDRAWN"},
     "PUBLISHED": {"MERGED", "ARCHIVED"},
     "MERGED": {"PUBLISHED", "ARCHIVED"},
 }
@@ -373,6 +569,8 @@ def report_dict(db: Session, report: ProblemReport, actor: User) -> dict[str, An
     author = db.get(User, report.author_id)
     reviewer = has_active_role(db, actor, "MODERATOR", "ADMIN")
     show_author = report.visibility != "SCHOOL_ANONYMOUS" or reviewer or actor.id == report.author_id
+    follow_up_evidence = db.scalars(select(Evidence).where(Evidence.report_id == report.id).order_by(Evidence.created_at.desc())).all()
+    can_see_follow_up = reviewer or actor.id == report.author_id
     return {
         "id": report.id,
         "title": report.title,
@@ -387,9 +585,16 @@ def report_dict(db: Session, report: ProblemReport, actor: User) -> dict[str, An
         "cluster_id": report.cluster_id,
         "author": author.display_name if show_author and author else "Anonymous student",
         "sensitivity_reason": report.sensitivity_reason if reviewer else None,
+        "follow_up_evidence": [{"id": item.id, "source": item.source, "type": item.evidence_type, "observation_date": item.observation_date, "relevance": item.relevance, "visibility": item.visibility, "file_name": item.file_name} for item in follow_up_evidence] if can_see_follow_up else [],
         "created_at": dt(report.created_at),
         "updated_at": dt(report.updated_at),
     }
+
+
+def evidence_is_visible(db: Session, evidence: Evidence, actor: User) -> bool:
+    if evidence.visibility == "SCHOOL" or evidence.author_id == actor.id:
+        return True
+    return has_active_role(db, actor, "MENTOR", "OSIS", "MODERATOR", "ADMIN")
 
 
 def cluster_dict(db: Session, cluster: ProblemCluster, actor: User) -> dict[str, Any]:
@@ -397,13 +602,30 @@ def cluster_dict(db: Session, cluster: ProblemCluster, actor: User) -> dict[str,
     signals = db.scalars(select(ProblemSignal).where(ProblemSignal.cluster_id == cluster.id)).all()
     evidence = db.scalars(select(Evidence).where(Evidence.cluster_id == cluster.id)).all()
     updates = db.scalars(select(OfficialUpdate).where(OfficialUpdate.cluster_id == cluster.id).order_by(OfficialUpdate.created_at.desc())).all()
+    commitments = db.scalars(select(ResponseCommitment).where(ResponseCommitment.cluster_id == cluster.id).order_by(ResponseCommitment.updated_at.desc())).all()
     signal_counts: dict[str, int] = {}
     for signal in signals:
         signal_counts[signal.signal_type] = signal_counts.get(signal.signal_type, 0) + 1
     reviewer = has_active_role(db, actor, "MODERATOR", "ADMIN")
     visible_reports = [r for r in reports if r.status in {"PUBLISHED", "MERGED"} or reviewer]
+    visible_evidence = [item for item in evidence if evidence_is_visible(db, item, actor)]
     followed = db.scalar(select(ProblemFollow).where(ProblemFollow.cluster_id == cluster.id, ProblemFollow.user_id == actor.id)) is not None
     priority = db.scalar(select(ProblemPriority).where(ProblemPriority.cluster_id == cluster.id, ProblemPriority.school_id == actor.school_id))
+    visible_commitments = [item for item in commitments if item.visibility == "SCHOOL" or commitment_scope(db, actor, item)[0]]
+    priority_assessment = None
+    if priority:
+        reviewer_user = db.get(User, priority.reviewed_by) if priority.reviewed_by else None
+        priority_assessment = {
+            "priority": priority.priority,
+            "evidence_strength": priority.evidence_strength,
+            "urgency_score": priority.urgency_score,
+            "reach_score": priority.reach_score,
+            "feasibility_score": priority.feasibility_score,
+            "rationale": priority.rationale,
+            "reviewed_by": reviewer_user.display_name if reviewer_user else None,
+            "review_date": priority.review_date,
+            "reviewed_at": dt(priority.reviewed_at),
+        }
     return {
         "id": cluster.id,
         "title": cluster.title,
@@ -412,15 +634,20 @@ def cluster_dict(db: Session, cluster: ProblemCluster, actor: User) -> dict[str,
         "scope": cluster.scope,
         "status": cluster.status,
         "affected_count": signal_counts.get("AFFECTS_ME", 0),
-        "evidence_count": len(evidence),
+        "evidence_count": len(visible_evidence),
         "report_count": len(visible_reports),
         "followed": followed,
         "priority": priority.priority if priority else None,
         "priority_rationale": priority.rationale if priority else cluster.priority_rationale,
+        "priority_assessment": priority_assessment,
         "signal_counts": signal_counts,
         "reports": [report_dict(db, r, actor) for r in visible_reports],
-        "evidence": [{"id": e.id, "source": e.source, "type": e.evidence_type, "observation_date": e.observation_date, "relevance": e.relevance, "visibility": e.visibility, "file_name": e.file_name} for e in evidence],
-        "official_updates": [{"id": u.id, "status": u.status, "message": u.message, "created_at": dt(u.created_at)} for u in updates],
+        "evidence": [{"id": e.id, "source": e.source, "type": e.evidence_type, "observation_date": e.observation_date, "relevance": e.relevance, "visibility": e.visibility, "file_name": e.file_name} for e in visible_evidence],
+        "official_updates": [{"id": u.id, "status": u.status, "message": u.message, "created_at": dt(u.created_at)} for u in updates if u.status == "PUBLISHED" or reviewer or u.author_id == actor.id],
+        "response_commitments": [commitment_dict(db, item, actor) for item in visible_commitments],
+        "response_loop": cluster_response_loop(db, cluster, actor),
+        "timeline": cluster_timeline(db, cluster, actor),
+        "needs_response": not bool(commitments or db.scalar(select(ResearchProject.id).where(ResearchProject.cluster_id == cluster.id))),
         "created_at": dt(cluster.created_at),
         "updated_at": dt(cluster.updated_at),
     }
@@ -600,6 +827,10 @@ def seed_demo() -> None:
             db.add(Metric(id="metric-canteen-wait", project_id="impact-canteen", name="Median canteen waiting time", description="Median observed waiting time from joining the queue to receiving an order.", unit="minutes", direction="DECREASE", collection_method="Anonymous time-stamped observations", target=7, is_primary=True))
             for task_id, title, owner_id, due_date in [("task-canteen-schedule", "Confirm observation schedule", "user-leader", "2026-09-02"), ("task-canteen-sampling", "Revise sampling method", "user-leader", "2026-09-03"), ("task-canteen-baseline", "Collect baseline observations", "user-multi", "2026-09-05"), ("task-canteen-update", "Prepare OSIS update", "user-osis", "2026-09-06")]:
                 db.add(ProjectTask(id=task_id, project_id="impact-canteen", title=title, owner_id=owner_id, status="TODO", priority="HIGH" if "baseline" in task_id else "MEDIUM", due_date=due_date))
+        if not db.get(ResponseCommitment, "commitment-canteen-response"):
+            db.add(ResponseCommitment(id="commitment-canteen-response", school_id=school.id, cluster_id="cluster-canteen", research_id="research-canteen", project_id="impact-canteen", title="Confirm a fair second-break queue response", intended_outcome="Agree whether a staggered ordering lane can be tested after the research and baseline gates are complete.", owner_role="OSIS_REVIEWER", owner_id=users["osis@demo.local"].id, assigned_by=users["admin@demo.local"].id, status="IN_PROGRESS", priority="HIGH", due_date="2026-09-06", next_update_date="2026-09-01", visibility="SCHOOL"))
+            db.flush()
+            db.add(ResponseCommitmentUpdate(id="commitment-update-canteen-1", school_id=school.id, commitment_id="commitment-canteen-response", author_id=users["osis@demo.local"].id, kind="UPDATE", message="OSIS is reviewing the validated concern and will publish the next decision after the research sampling is revised.", visibility="SCHOOL"))
         if not db.get(OfficialUpdate, "update-canteen-draft"):
             db.add(OfficialUpdate(id="update-canteen-draft", school_id=school.id, cluster_id="cluster-canteen", author_id=users["osis@demo.local"].id, status="DRAFT", message="The OSIS team is reviewing a validated synthetic concern about second-break canteen waiting time. No intervention result has been claimed."))
         db.flush()
@@ -855,6 +1086,12 @@ def dashboard(workspace: str | None = None, actor: User = Depends(get_current_us
     own_reports = db.scalars(select(ProblemReport).where(ProblemReport.school_id == actor.school_id, ProblemReport.author_id == actor.id).order_by(ProblemReport.updated_at.desc()).limit(6)).all()
     followed_clusters = db.scalars(select(ProblemCluster).join(ProblemFollow, ProblemFollow.cluster_id == ProblemCluster.id).where(ProblemFollow.user_id == actor.id, ProblemCluster.school_id == actor.school_id).order_by(ProblemCluster.updated_at.desc()).limit(6)).all()
     own_tasks = db.scalars(select(ProjectTask).where(ProjectTask.owner_id == actor.id).order_by(ProjectTask.due_date, ProjectTask.title).limit(8)).all()
+    manager_view = selected_role in {"MENTOR", "OSIS_REVIEWER", "ADMINISTRATOR"}
+    commitment_query = select(ResponseCommitment).where(ResponseCommitment.school_id == actor.school_id)
+    if not manager_view:
+        commitment_query = commitment_query.where(ResponseCommitment.owner_id == actor.id)
+    response_commitments = db.scalars(commitment_query.order_by(ResponseCommitment.due_date, ResponseCommitment.next_update_date, ResponseCommitment.title).limit(12)).all()
+    ensure_commitment_reminders(db, actor, response_commitments)
     leader_research = db.scalars(select(ResearchProject).where(ResearchProject.school_id == actor.school_id, ResearchProject.leader_id == actor.id).order_by(ResearchProject.updated_at.desc()).limit(6)).all()
     mentor_research = db.scalars(select(ResearchProject).where(ResearchProject.school_id == actor.school_id, ResearchProject.mentor_id == actor.id).order_by(ResearchProject.updated_at.desc()).limit(8)).all()
     leader_projects = db.scalars(select(ImpactProject).where(ImpactProject.school_id == actor.school_id, ImpactProject.leader_id == actor.id).order_by(ImpactProject.updated_at.desc()).limit(6)).all()
@@ -873,46 +1110,54 @@ def dashboard(workspace: str | None = None, actor: User = Depends(get_current_us
     def project_item(item: ImpactProject) -> dict[str, Any]:
         return {"id": item.id, "title": item.title, "status": item.status, "href": f"/app/projects/{item.id}", "cluster_id": item.cluster_id}
 
+    def commitment_item(item: ResponseCommitment) -> dict[str, Any]:
+        return commitment_dict(db, item, actor, include_updates=False)
+
     attention: list[dict[str, Any]] = []
     my_work: list[dict[str, Any]] = []
     role_sections: dict[str, Any] = {}
     primary_action = {"label": "Report a concern", "href": "/app/problems/new", "permission": "problem_report.create"}
     if selected_role == "STUDENT_CONTRIBUTOR":
         primary_action = {"label": "Report a concern", "href": "/app/problems/new", "permission": "problem_report.create"}
-        my_work = [{"id": r.id, "title": r.title, "status": r.status, "href": f"/app/reports/{r.id}"} for r in own_reports] + [{"id": c.id, "title": c.title, "status": "FOLLOWING", "href": f"/app/problems/{c.id}"} for c in followed_clusters]
-        role_sections = {"my_recent_reports": [{"id": r.id, "title": r.title, "status": r.status, "href": f"/app/reports/{r.id}"} for r in own_reports], "followed_problems": [{"id": c.id, "title": c.title, "status": c.status, "href": f"/app/problems/{c.id}"} for c in followed_clusters]}
+        my_work = [{"id": r.id, "title": r.title, "status": r.status, "href": f"/app/reports/{r.id}"} for r in own_reports] + [{"id": c.id, "title": c.title, "status": "FOLLOWING", "href": f"/app/problems/{c.id}"} for c in followed_clusters] + [commitment_item(item) for item in response_commitments]
+        role_sections = {"my_recent_reports": [{"id": r.id, "title": r.title, "status": r.status, "href": f"/app/reports/{r.id}"} for r in own_reports], "followed_problems": [{"id": c.id, "title": c.title, "status": c.status, "href": f"/app/problems/{c.id}"} for c in followed_clusters], "response_commitments": [commitment_item(item) for item in response_commitments]}
         if not own_reports:
             attention.append({"id": "student-report", "title": "Start with a recurring concern", "detail": "Describe an observable issue affecting school life.", "href": "/app/problems/new"})
     elif selected_role == "STUDENT_PROJECT_LEADER":
         primary_action = {"label": "Continue active project" if leader_research or leader_projects else "Start from an approved problem", "href": f"/app/research/{leader_research[0].id}" if leader_research else "/app/problems" , "permission": "research.create"}
-        my_work = [research_item(r) for r in leader_research] + [project_item(p) for p in leader_projects] + [task_item(t) for t in own_tasks]
+        my_work = [research_item(r) for r in leader_research] + [project_item(p) for p in leader_projects] + [task_item(t) for t in own_tasks] + [commitment_item(item) for item in response_commitments]
         attention = [{"id": r.id, "title": r.title, "detail": "Plan awaiting mentor review." if r.status == "MENTOR_REVIEW" else "Continue your research workspace.", "href": f"/app/research/{r.id}"} for r in leader_research if r.status in {"MENTOR_REVIEW", "CHANGES_REQUESTED", "DRAFT"}][:4]
-        role_sections = {"research": [research_item(r) for r in leader_research], "projects": [project_item(p) for p in leader_projects], "tasks": [task_item(t) for t in own_tasks]}
+        role_sections = {"research": [research_item(r) for r in leader_research], "projects": [project_item(p) for p in leader_projects], "tasks": [task_item(t) for t in own_tasks], "response_commitments": [commitment_item(item) for item in response_commitments]}
     elif selected_role == "MENTOR":
         primary_action = {"label": "Review next submission", "href": "/app/mentor/reviews", "permission": "mentor.review"}
         attention = [{"id": r.id, "title": r.title, "detail": "Research plan needs your decision.", "href": f"/app/research/{r.id}"} for r in mentor_research if r.status == "MENTOR_REVIEW"]
-        my_work = [research_item(r) for r in mentor_research] + [project_item(p) for p in mentor_projects]
-        role_sections = {"reviews_awaiting_attention": [research_item(r) for r in mentor_research if r.status == "MENTOR_REVIEW"], "assigned_research": [research_item(r) for r in mentor_research], "assigned_projects": [project_item(p) for p in mentor_projects]}
+        attention += [{"id": item.id, "title": item.title, "detail": commitment_reminder(item)[1], "href": f"/app/problems/{item.cluster_id}"} for item in response_commitments if item.status not in RESPONSE_COMMITMENT_TERMINAL and commitment_reminder(item)]
+        my_work = [research_item(r) for r in mentor_research] + [project_item(p) for p in mentor_projects] + [commitment_item(item) for item in response_commitments]
+        role_sections = {"reviews_awaiting_attention": [research_item(r) for r in mentor_research if r.status == "MENTOR_REVIEW"], "assigned_research": [research_item(r) for r in mentor_research], "assigned_projects": [project_item(p) for p in mentor_projects], "response_commitments": [commitment_item(item) for item in response_commitments]}
     elif selected_role == "OSIS_REVIEWER":
         primary_action = {"label": "Review school priorities", "href": "/app/osis/priorities", "permission": "osis.priority_manage"}
         attention = [{"id": c.id, "title": c.title, "detail": "Validated problem ready for prioritization.", "href": f"/app/problems/{c.id}"} for c in validated_clusters]
-        my_work = [{"id": c.id, "title": c.title, "status": c.status, "href": f"/app/problems/{c.id}"} for c in validated_clusters]
-        role_sections = {"validated_problems": my_work, "official_updates": [{"id": u.id, "title": "Official update draft", "detail": u.message, "status": u.status, "href": f"/app/problems/{u.cluster_id}"} for u in updates]}
+        attention += [{"id": item.id, "title": item.title, "detail": commitment_reminder(item)[1], "href": f"/app/problems/{item.cluster_id}"} for item in response_commitments if item.status not in RESPONSE_COMMITMENT_TERMINAL and commitment_reminder(item)]
+        my_work = [{"id": c.id, "title": c.title, "status": c.status, "href": f"/app/problems/{c.id}"} for c in validated_clusters] + [commitment_item(item) for item in response_commitments]
+        role_sections = {"validated_problems": [{"id": c.id, "title": c.title, "status": c.status, "href": f"/app/problems/{c.id}"} for c in validated_clusters], "response_commitments": [commitment_item(item) for item in response_commitments], "official_updates": [{"id": u.id, "title": "Official update draft", "detail": u.message, "status": u.status, "href": f"/app/problems/{u.cluster_id}"} for u in updates]}
     elif selected_role == "MODERATOR":
         primary_action = {"label": "Review next report", "href": "/app/moderation/reports", "permission": "moderation.review"}
         attention = [{"id": r.id, "title": r.title, "detail": "Restricted review." if r.status == "PRIVATE_REVIEW" else "New report awaiting moderation.", "href": f"/app/moderation/reports/{r.id}"} for r in moderation_reports]
-        my_work = attention
-        role_sections = {"new_reports": [a for a in attention if next((r.status for r in moderation_reports if r.id == a["id"]), "") == "MODERATION_REVIEW"], "restricted_reports": [a for a in attention if next((r.status for r in moderation_reports if r.id == a["id"]), "") == "PRIVATE_REVIEW"]}
+        my_work = attention + [commitment_item(item) for item in response_commitments]
+        role_sections = {"new_reports": [a for a in attention if next((r.status for r in moderation_reports if r.id == a["id"]), "") == "MODERATION_REVIEW"], "restricted_reports": [a for a in attention if next((r.status for r in moderation_reports if r.id == a["id"]), "") == "PRIVATE_REVIEW"], "response_commitments": [commitment_item(item) for item in response_commitments]}
     elif selected_role == "ADMINISTRATOR":
         primary_action = {"label": "Invite SPI member", "href": "/app/admin/invitations", "permission": "admin.invitations.manage"}
         active_members = db.scalar(select(func.count()).select_from(User).where(User.school_id == actor.school_id, User.active.is_(True))) or 0
         deactivated_members = db.scalar(select(func.count()).select_from(User).where(User.school_id == actor.school_id, User.active.is_(False))) or 0
         pending_invitations = db.scalar(select(func.count()).select_from(Invitation).where(Invitation.school_id == actor.school_id, Invitation.status == "PENDING", Invitation.expires_at > datetime.utcnow())) or 0
         attention = [{"id": "admin-invites", "title": "Pending invitations", "detail": f"{pending_invitations} invitation(s) awaiting activation.", "href": "/app/admin/invitations"}, {"id": "admin-members", "title": "Membership oversight", "detail": f"{active_members} active and {deactivated_members} deactivated member(s).", "href": "/app/admin/members"}]
-        role_sections = {"members": {"active": active_members, "deactivated": deactivated_members}, "pending_invitations": pending_invitations}
+        attention += [{"id": item.id, "title": item.title, "detail": commitment_reminder(item)[1], "href": f"/app/problems/{item.cluster_id}"} for item in response_commitments if item.status not in RESPONSE_COMMITMENT_TERMINAL and commitment_reminder(item)]
+        my_work = [commitment_item(item) for item in response_commitments]
+        role_sections = {"members": {"active": active_members, "deactivated": deactivated_members}, "pending_invitations": pending_invitations, "response_commitments": [commitment_item(item) for item in response_commitments]}
 
-    summary = {"my_open_reports": sum(1 for r in own_reports if r.status not in {"ARCHIVED", "MERGED"}), "followed_problems": len(followed_clusters), "incomplete_tasks": sum(1 for t in own_tasks if t.status != "COMPLETED"), "attention_count": len(attention)}
+    summary = {"my_open_reports": sum(1 for r in own_reports if r.status not in {"ARCHIVED", "MERGED"}), "followed_problems": len(followed_clusters), "incomplete_tasks": sum(1 for t in own_tasks if t.status != "COMPLETED") + sum(1 for item in response_commitments if item.status not in RESPONSE_COMMITMENT_TERMINAL), "attention_count": len(attention)}
     recent = [{"id": n.id, "title": n.title, "message": n.message, "href": "/app/notifications", "created_at": dt(n.created_at)} for n in notifications]
+    db.commit()
     return {"viewer": {"id": actor.id, "display_name": actor.display_name, "school": {"id": school.id if school else actor.school_id, "name": school.name if school else "Pilar Impact Lab", "slug": school.slug if school else "pilar-impact-lab"}, "roles": [{"code": code, "label": ROLE_DETAILS.get(code, (code.replace("_", " ").title(), ""))[0]} for code in active_roles], "active_workspace": selected_role, "responsibility": role_description}, "primary_action": primary_action, "summary": summary, "attention_items": attention, "my_work": my_work, "recent_updates": recent, "role_sections": role_sections, "mode": app_mode(), "synthetic_data": app_mode() == "DEMO"}
 
 
@@ -1023,6 +1268,55 @@ def get_report(report_id: str, actor: User = Depends(get_current_user), db: Sess
     return report_dict(db, report, actor)
 
 
+@app.post(f"{API}/problem-reports/{{report_id}}/follow-up-evidence", dependencies=[Depends(require_csrf)])
+def add_report_follow_up_evidence(report_id: str, payload: EvidenceCreate, actor: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    report = db.get(ProblemReport, report_id)
+    if not report or report.school_id != actor.school_id:
+        raise HTTPException(status_code=404, detail="Report not found.")
+    reviewer = has_active_role(db, actor, "MODERATOR", "ADMIN")
+    if report.author_id != actor.id and not reviewer:
+        raise HTTPException(status_code=403, detail="Only the report author or a designated reviewer can add follow-up evidence.")
+    if report.status in {"ARCHIVED", "WITHDRAWN", "MERGED"}:
+        raise HTTPException(status_code=409, detail="Follow-up evidence cannot be added to this report state.")
+    evidence = Evidence(id=new_id(), school_id=actor.school_id, author_id=actor.id, report_id=report.id, cluster_id=report.cluster_id, **payload.model_dump())
+    db.add(evidence)
+    audit(db, actor, "REPORT_FOLLOW_UP_EVIDENCE_ADDED", "PROBLEM_REPORT", report.id, {"evidence_id": evidence.id, "visibility": evidence.visibility})
+    db.commit()
+    return report_dict(db, report, actor)
+
+
+@app.post(f"{API}/problem-reports/{{report_id}}/request-correction", dependencies=[Depends(require_csrf)])
+def request_report_correction(report_id: str, payload: DecisionRequest, actor: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    report = db.get(ProblemReport, report_id)
+    if not report or report.school_id != actor.school_id:
+        raise HTTPException(status_code=404, detail="Report not found.")
+    if report.author_id != actor.id:
+        raise HTTPException(status_code=403, detail="Only the report author can request a correction.")
+    if report.status not in {"MODERATION_REVIEW", "PRIVATE_REVIEW"}:
+        raise HTTPException(status_code=409, detail="A correction can only be requested before publication.")
+    transition(db, actor, report, "PROBLEM_REPORT", "CHANGES_REQUESTED", PROBLEM_TRANSITIONS, payload.reason)
+    audit(db, actor, "REPORT_CORRECTION_REQUESTED", "PROBLEM_REPORT", report.id, {"reason_recorded": True})
+    for moderator in db.scalars(select(User).where(User.school_id == actor.school_id, User.role.in_(["MODERATOR", "ADMIN"]), User.active.is_(True))).all():
+        notify(db, moderator.id, "Report correction requested", f"The author requested a correction for: {report.title}")
+    db.commit()
+    return report_dict(db, report, actor)
+
+
+@app.post(f"{API}/problem-reports/{{report_id}}/withdraw", dependencies=[Depends(require_csrf)])
+def withdraw_report(report_id: str, actor: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    report = db.get(ProblemReport, report_id)
+    if not report or report.school_id != actor.school_id:
+        raise HTTPException(status_code=404, detail="Report not found.")
+    if report.author_id != actor.id:
+        raise HTTPException(status_code=403, detail="Only the report author can withdraw this report.")
+    if report.status not in {"DRAFT", "MODERATION_REVIEW", "PRIVATE_REVIEW", "CHANGES_REQUESTED"}:
+        raise HTTPException(status_code=409, detail="This report can no longer be withdrawn.")
+    transition(db, actor, report, "PROBLEM_REPORT", "WITHDRAWN", PROBLEM_TRANSITIONS, "Author withdrew the report before publication.")
+    audit(db, actor, "REPORT_WITHDRAWN", "PROBLEM_REPORT", report.id)
+    db.commit()
+    return report_dict(db, report, actor)
+
+
 @app.post(f"{API}/problem-reports/{{report_id}}/submit", dependencies=[Depends(require_csrf)])
 def submit_report(report_id: str, actor: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
     report = db.get(ProblemReport, report_id)
@@ -1045,7 +1339,7 @@ def submit_report(report_id: str, actor: User = Depends(get_current_user), db: S
 
 @app.get(f"{API}/problem-clusters")
 @app.get(f"{API}/problems")
-def list_clusters(search: str = "", category: str = "", status: str = "", sort: str = "updated", actor: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+def list_clusters(search: str = "", category: str = "", status: str = "", sort: str = "updated", needs_response: bool = False, stale: bool = False, priority: str = "", actor: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[dict[str, Any]]:
     query = select(ProblemCluster).where(ProblemCluster.school_id == actor.school_id)
     if search.strip():
         term = f"%{search.strip()}%"
@@ -1058,7 +1352,17 @@ def list_clusters(search: str = "", category: str = "", status: str = "", sort: 
         query = query.where(ProblemCluster.status == "VALIDATED")
     order_column = ProblemCluster.title if sort == "title" else ProblemCluster.created_at if sort == "created" else ProblemCluster.updated_at
     clusters = db.scalars(query.order_by(order_column.desc())).all()
-    return [cluster_dict(db, cluster, actor) for cluster in clusters]
+    rows = [cluster_dict(db, cluster, actor) for cluster in clusters]
+    if needs_response:
+        rows = [row for row in rows if row["needs_response"]]
+    if stale:
+        rows = [row for row in rows if row["response_loop"].get("is_stale")]
+    if priority.strip():
+        rows = [row for row in rows if row.get("priority") == priority.upper()]
+    if sort == "priority":
+        order = {"URGENT": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, None: 4}
+        rows.sort(key=lambda row: order.get(row.get("priority"), 5))
+    return rows
 
 
 @app.get(f"{API}/problem-clusters/{{cluster_id}}")
@@ -1071,6 +1375,77 @@ def get_cluster(cluster_id: str, actor: User = Depends(get_current_user), db: Se
     if has_active_role(db, actor, "OSIS") and not has_active_role(db, actor, "MODERATOR", "ADMIN") and cluster.status != "VALIDATED":
         raise HTTPException(404, "Problem cluster not found.")
     return cluster_dict(db, cluster, actor)
+
+
+@app.get(f"{API}/problem-clusters/{{cluster_id}}/timeline")
+@app.get(f"{API}/problems/{{cluster_id}}/timeline")
+def problem_timeline(cluster_id: str, actor: User = Depends(require_permissions("problem.read_public_school")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    cluster = db.get(ProblemCluster, cluster_id)
+    if not cluster or cluster.school_id != actor.school_id:
+        raise HTTPException(status_code=404, detail="Problem cluster not found.")
+    if has_active_role(db, actor, "OSIS") and not has_active_role(db, actor, "MODERATOR", "ADMIN") and cluster.status != "VALIDATED":
+        raise HTTPException(status_code=404, detail="Problem cluster not found.")
+    return {"cluster_id": cluster.id, "items": cluster_timeline(db, cluster, actor)}
+
+
+@app.get(f"{API}/problem-clusters/{{cluster_id}}/work")
+@app.get(f"{API}/problems/{{cluster_id}}/work")
+def problem_work(cluster_id: str, actor: User = Depends(require_permissions("problem.read_public_school")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    cluster = db.get(ProblemCluster, cluster_id)
+    if not cluster or cluster.school_id != actor.school_id:
+        raise HTTPException(status_code=404, detail="Problem cluster not found.")
+    if has_active_role(db, actor, "OSIS") and not has_active_role(db, actor, "MODERATOR", "ADMIN") and cluster.status != "VALIDATED":
+        raise HTTPException(status_code=404, detail="Problem cluster not found.")
+    manager = has_active_role(db, actor, "MENTOR", "OSIS", "ADMIN")
+    commitments = db.scalars(select(ResponseCommitment).where(ResponseCommitment.cluster_id == cluster.id).order_by(ResponseCommitment.updated_at.desc())).all()
+    commitments = [item for item in commitments if item.visibility == "SCHOOL" or commitment_scope(db, actor, item)[0]]
+    projects = db.scalars(select(ImpactProject).where(ImpactProject.cluster_id == cluster.id, ImpactProject.school_id == actor.school_id)).all()
+    project_ids = {project.id for project in projects}
+    tasks = db.scalars(select(ProjectTask).where(ProjectTask.project_id.in_(project_ids))).all() if project_ids else []
+    visible_tasks = []
+    for task in tasks:
+        project = next((item for item in projects if item.id == task.project_id), None)
+        if not project:
+            continue
+        if manager or task.owner_id == actor.id or actor.id in {project.leader_id, project.mentor_id}:
+            visible_tasks.append({"id": task.id, "type": "PROJECT_TASK", "title": task.title, "status": task.status, "priority": task.priority, "due_date": task.due_date, "owner_id": task.owner_id, "project_id": task.project_id, "cluster_id": cluster.id, "cluster_title": cluster.title, "href": f"/app/projects/{task.project_id}"})
+    return {"cluster_id": cluster.id, "commitments": [commitment_dict(db, item, actor) for item in commitments], "project_tasks": visible_tasks}
+
+
+@app.get(f"{API}/work")
+def unified_work(status_filter: str = "", kind: str = "", stale: bool = False, actor: User = Depends(require_permissions("response_commitment.read")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    manager = has_active_role(db, actor, "MENTOR", "OSIS", "ADMIN")
+    commitment_query = select(ResponseCommitment).where(ResponseCommitment.school_id == actor.school_id)
+    if not manager:
+        commitment_query = commitment_query.where(ResponseCommitment.owner_id == actor.id)
+    commitments = db.scalars(commitment_query.order_by(ResponseCommitment.due_date, ResponseCommitment.title)).all()
+    ensure_commitment_reminders(db, actor, commitments)
+    tasks = []
+    if "task.read_assigned" in active_permissions(db, actor):
+        tasks = db.scalars(select(ProjectTask).join(ImpactProject, ImpactProject.id == ProjectTask.project_id).where(ImpactProject.school_id == actor.school_id, ProjectTask.owner_id == actor.id).order_by(ProjectTask.due_date, ProjectTask.title)).all()
+    project_map = {project.id: project for project in db.scalars(select(ImpactProject).where(ImpactProject.school_id == actor.school_id, ImpactProject.id.in_({task.project_id for task in tasks}))).all()}
+    items: list[dict[str, Any]] = []
+    for item in commitments:
+        row = commitment_dict(db, item, actor)
+        if status_filter.strip() and item.status != status_filter.upper():
+            continue
+        if stale and not row["is_stale"]:
+            continue
+        if kind.strip() and kind.upper() not in {"RESPONSE_COMMITMENT", "COMMITMENT"}:
+            continue
+        items.append(row)
+    for task in tasks:
+        if status_filter.strip() and task.status != status_filter.upper():
+            continue
+        if kind.strip() and kind.upper() not in {"PROJECT_TASK", "TASK"}:
+            continue
+        due = parse_day(task.due_date, "due_date")
+        project = project_map.get(task.project_id)
+        items.append({"id": task.id, "type": "PROJECT_TASK", "title": task.title, "status": task.status, "priority": task.priority, "due_date": task.due_date, "owner_id": task.owner_id, "project_id": task.project_id, "cluster_id": project.cluster_id if project else None, "cluster_title": db.get(ProblemCluster, project.cluster_id).title if project and db.get(ProblemCluster, project.cluster_id) else None, "is_overdue": bool(due and due < date.today() and task.status != "COMPLETED"), "is_stale": False, "reminder_state": "OVERDUE" if due and due < date.today() and task.status != "COMPLETED" else None, "href": f"/app/projects/{task.project_id}"})
+    items.sort(key=lambda item: (item.get("due_date") or "9999-12-31", item.get("title") or ""))
+    if commitments:
+        db.commit()
+    return {"items": items, "summary": {"total": len(items), "response_commitments": sum(1 for item in items if item["type"] == "RESPONSE_COMMITMENT"), "project_tasks": sum(1 for item in items if item["type"] == "PROJECT_TASK"), "overdue": sum(1 for item in items if item.get("is_overdue")), "stale": sum(1 for item in items if item.get("is_stale"))}, "manager_view": manager}
 
 
 @app.post(f"{API}/problem-clusters/{{cluster_id}}/signals", dependencies=[Depends(require_csrf)])
@@ -1266,6 +1641,162 @@ def set_osis_priority(cluster_id: str, payload: PriorityRequest, actor: User = D
     audit(db, actor, "OSIS_PRIORITY_SET", "PROBLEM_CLUSTER", cluster_id, {"priority": payload.priority})
     db.commit()
     return cluster_dict(db, cluster, actor)
+
+
+def get_commitment_or_404(db: Session, actor: User, commitment_id: str) -> ResponseCommitment:
+    commitment = db.get(ResponseCommitment, commitment_id)
+    if not commitment or commitment.school_id != actor.school_id:
+        raise HTTPException(status_code=404, detail="Response commitment not found.")
+    cluster = db.get(ProblemCluster, commitment.cluster_id)
+    if not cluster or cluster.school_id != actor.school_id or cluster.status not in RESPONSE_VISIBLE_CLUSTER_STATES:
+        raise HTTPException(status_code=404, detail="Response commitment not found.")
+    return commitment
+
+
+@app.post(f"{API}/problem-clusters/{{cluster_id}}/priority-assessment", dependencies=[Depends(require_csrf)])
+@app.post(f"{API}/problems/{{cluster_id}}/priority-assessment", dependencies=[Depends(require_csrf)])
+def assess_problem_priority(cluster_id: str, payload: PriorityAssessmentRequest, actor: User = Depends(require_permissions("problem.priority_assess")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    cluster = db.get(ProblemCluster, cluster_id)
+    if not cluster or cluster.school_id != actor.school_id or cluster.status != "VALIDATED":
+        raise HTTPException(status_code=404, detail="Validated problem not found.")
+    parse_day(payload.review_date, "review_date")
+    priority = db.scalar(select(ProblemPriority).where(ProblemPriority.cluster_id == cluster_id, ProblemPriority.school_id == actor.school_id))
+    if not priority:
+        priority = ProblemPriority(id=new_id(), cluster_id=cluster_id, school_id=actor.school_id, assigned_by=actor.id, priority=payload.priority, rationale=payload.rationale)
+        db.add(priority)
+    priority.priority = payload.priority
+    priority.rationale = payload.rationale
+    priority.evidence_strength = payload.evidence_strength
+    priority.urgency_score = payload.urgency_score
+    priority.reach_score = payload.reach_score
+    priority.feasibility_score = payload.feasibility_score
+    priority.reviewed_by = actor.id
+    priority.reviewed_at = datetime.utcnow()
+    priority.review_date = payload.review_date
+    priority.assigned_by = actor.id
+    cluster.priority_rationale = payload.rationale
+    cluster.updated_at = datetime.utcnow()
+    audit(db, actor, "PROBLEM_PRIORITY_ASSESSED", "PROBLEM_CLUSTER", cluster.id, {"priority": payload.priority, "evidence_strength": payload.evidence_strength, "urgency_score": payload.urgency_score, "reach_score": payload.reach_score, "feasibility_score": payload.feasibility_score})
+    db.commit()
+    return cluster_dict(db, cluster, actor)
+
+
+@app.get(f"{API}/response-commitments/{{commitment_id}}")
+def get_response_commitment(commitment_id: str, actor: User = Depends(require_permissions("response_commitment.read")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    commitment = get_commitment_or_404(db, actor, commitment_id)
+    if commitment.visibility == "TEAM" and not commitment_scope(db, actor, commitment)[0]:
+        raise HTTPException(status_code=404, detail="Response commitment not found.")
+    return commitment_dict(db, commitment, actor)
+
+
+@app.post(f"{API}/response-commitments", dependencies=[Depends(require_csrf)])
+def create_response_commitment(payload: ResponseCommitmentCreate, actor: User = Depends(require_permissions("response_commitment.create")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    cluster = db.get(ProblemCluster, payload.cluster_id)
+    if not cluster or cluster.school_id != actor.school_id or cluster.status not in RESPONSE_VISIBLE_CLUSTER_STATES:
+        raise HTTPException(status_code=404, detail="A validated problem is required before creating a response commitment.")
+    if not payload.due_date and not payload.next_update_date:
+        raise HTTPException(status_code=422, detail="Set a due date or next-update date so the commitment can be followed through.")
+    parse_day(payload.due_date, "due_date")
+    parse_day(payload.next_update_date, "next_update_date")
+    validate_commitment_links(db, actor, payload.cluster_id, payload.research_id, payload.project_id)
+    owner_role, owner = validate_commitment_owner(db, actor, payload.owner_role, payload.owner_id)
+    item = ResponseCommitment(id=new_id(), school_id=actor.school_id, cluster_id=payload.cluster_id, research_id=payload.research_id, project_id=payload.project_id, title=payload.title, intended_outcome=payload.intended_outcome, owner_role=owner_role, owner_id=owner.id if owner else None, assigned_by=actor.id, priority=payload.priority, due_date=payload.due_date, next_update_date=payload.next_update_date or payload.due_date, visibility=payload.visibility)
+    db.add(item)
+    audit(db, actor, "RESPONSE_COMMITMENT_CREATED", "RESPONSE_COMMITMENT", item.id, {"cluster_id": item.cluster_id, "owner_role": item.owner_role, "owner_id": item.owner_id, "priority": item.priority})
+    if owner and owner.id != actor.id:
+        notify(db, owner.id, "You own a response commitment", f"{item.title} needs an update by {item.next_update_date or item.due_date or 'the agreed date'}.")
+    db.commit()
+    return commitment_dict(db, item, actor)
+
+
+@app.patch(f"{API}/response-commitments/{{commitment_id}}", dependencies=[Depends(require_csrf)])
+def patch_response_commitment(commitment_id: str, payload: ResponseCommitmentPatch, actor: User = Depends(require_permissions("response_commitment.manage_assigned")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    item = get_commitment_or_404(db, actor, commitment_id)
+    can_manage, manager = commitment_scope(db, actor, item)
+    if not can_manage:
+        raise HTTPException(status_code=403, detail={"code": "PERMISSION_DENIED", "message": "Only the commitment owner or an accountable reviewer can update this commitment."})
+    changes = payload.model_dump(exclude_unset=True)
+    next_status = changes.get("status")
+    previous_status = item.status
+    if next_status and next_status != item.status:
+        if next_status == "COMPLETED" and not (str(changes.get("completion_note", item.completion_note) or "").strip() or str(changes.get("evidence_reference", item.evidence_reference) or "").strip()):
+            raise HTTPException(status_code=422, detail="A completed commitment needs a completion note or evidence reference.")
+        if next_status == "NOT_NOW" and not (changes.get("next_update_date", item.next_update_date) and (str(changes.get("reason", "") or "").strip() or str(changes.get("blocker", item.blocker) or "").strip() or str(changes.get("completion_note", item.completion_note) or "").strip())):
+            raise HTTPException(status_code=422, detail="A not-now decision needs a reason and a next-update date.")
+        if next_status in {"DECLINED", "BLOCKED"} and not (str(changes.get("reason", "") or "").strip() or str(changes.get("blocker", item.blocker) or "").strip()):
+            raise HTTPException(status_code=422, detail="Add a reason for declining or blocking this commitment.")
+        transition(db, actor, item, "RESPONSE_COMMITMENT", next_status, RESPONSE_COMMITMENT_TRANSITIONS, str(changes.get("reason", "") or changes.get("blocker", "") or "").strip())
+        if next_status == "COMPLETED":
+            item.completed_at = datetime.utcnow()
+        elif item.status != "COMPLETED":
+            item.completed_at = None
+    if "due_date" in changes:
+        parse_day(changes["due_date"], "due_date")
+    if "next_update_date" in changes:
+        parse_day(changes["next_update_date"], "next_update_date")
+    if "owner_role" in changes or "owner_id" in changes:
+        owner_role, owner = validate_commitment_owner(db, actor, changes.get("owner_role", item.owner_role), changes.get("owner_id", item.owner_id))
+        if item.owner_id != (owner.id if owner else None):
+            audit(db, actor, "RESPONSE_COMMITMENT_OWNER_CHANGED", "RESPONSE_COMMITMENT", item.id, {"from_owner_id": item.owner_id, "to_owner_id": owner.id if owner else None, "owner_role": owner_role})
+            item.owner_id = owner.id if owner else None
+        item.owner_role = owner_role
+    for field in ("title", "intended_outcome", "priority", "due_date", "next_update_date", "blocker", "completion_note", "evidence_reference", "visibility"):
+        if field in changes:
+            setattr(item, field, changes[field])
+    item.updated_at = datetime.utcnow()
+    audit(db, actor, "RESPONSE_COMMITMENT_UPDATED", "RESPONSE_COMMITMENT", item.id, {"fields": sorted(field for field in changes if field != "reason")})
+    if next_status and next_status != previous_status and item.owner_id and item.owner_id != actor.id:
+        notify(db, item.owner_id, "Response commitment updated", f"{item.title} is now {item.status.replace('_', ' ').lower()}.")
+    db.commit()
+    return commitment_dict(db, item, actor)
+
+
+@app.post(f"{API}/response-commitments/{{commitment_id}}/updates", dependencies=[Depends(require_csrf)])
+def create_response_commitment_update(commitment_id: str, payload: ResponseCommitmentUpdateCreate, actor: User = Depends(require_permissions("response_commitment.manage_assigned")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    item = get_commitment_or_404(db, actor, commitment_id)
+    can_manage, _ = commitment_scope(db, actor, item)
+    if not can_manage:
+        raise HTTPException(status_code=403, detail={"code": "PERMISSION_DENIED", "message": "Only the commitment owner or an accountable reviewer can add an update."})
+    update = ResponseCommitmentUpdate(id=new_id(), school_id=actor.school_id, commitment_id=item.id, author_id=actor.id, kind=payload.kind, message=payload.message, visibility=payload.visibility)
+    db.add(update)
+    item.updated_at = datetime.utcnow()
+    audit(db, actor, "RESPONSE_COMMITMENT_UPDATE_ADDED", "RESPONSE_COMMITMENT", item.id, {"kind": payload.kind, "visibility": payload.visibility})
+    if item.owner_id and item.owner_id != actor.id:
+        notify(db, item.owner_id, "Response commitment update", payload.message)
+    db.commit()
+    return commitment_dict(db, item, actor)
+
+
+@app.post(f"{API}/response-commitments/{{commitment_id}}/transfer", dependencies=[Depends(require_csrf)])
+def transfer_response_commitment(commitment_id: str, payload: ResponseCommitmentTransfer, actor: User = Depends(require_permissions("response_commitment.manage")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    item = get_commitment_or_404(db, actor, commitment_id)
+    owner_role, owner = validate_commitment_owner(db, actor, payload.owner_role, payload.owner_id)
+    previous_owner = item.owner_id
+    item.owner_role = owner_role
+    item.owner_id = owner.id if owner else None
+    item.assigned_by = actor.id
+    item.updated_at = datetime.utcnow()
+    audit(db, actor, "RESPONSE_COMMITMENT_TRANSFERRED", "RESPONSE_COMMITMENT", item.id, {"from_owner_id": previous_owner, "to_owner_id": item.owner_id, "owner_role": owner_role, "reason": payload.reason})
+    if owner and owner.id != actor.id:
+        notify(db, owner.id, "Response commitment assigned to you", f"{item.title} needs an update by {item.next_update_date or item.due_date or 'the agreed date'}.")
+    db.commit()
+    return commitment_dict(db, item, actor)
+
+
+@app.post(f"{API}/response-commitments/{{commitment_id}}/complete", dependencies=[Depends(require_csrf)])
+def complete_response_commitment(commitment_id: str, payload: ResponseCommitmentComplete, actor: User = Depends(require_permissions("response_commitment.manage_assigned")), db: Session = Depends(get_db)) -> dict[str, Any]:
+    item = get_commitment_or_404(db, actor, commitment_id)
+    can_manage, _ = commitment_scope(db, actor, item)
+    if not can_manage:
+        raise HTTPException(status_code=403, detail={"code": "PERMISSION_DENIED", "message": "Only the commitment owner or an accountable reviewer can complete this commitment."})
+    transition(db, actor, item, "RESPONSE_COMMITMENT", "COMPLETED", RESPONSE_COMMITMENT_TRANSITIONS, "Completion recorded by owner.")
+    item.completion_note = payload.completion_note
+    item.evidence_reference = payload.evidence_reference
+    item.completed_at = datetime.utcnow()
+    item.updated_at = datetime.utcnow()
+    audit(db, actor, "RESPONSE_COMMITMENT_COMPLETED", "RESPONSE_COMMITMENT", item.id, {"has_evidence_reference": bool(payload.evidence_reference.strip())})
+    db.commit()
+    return commitment_dict(db, item, actor)
 
 
 @app.post(f"{API}/research-projects", dependencies=[Depends(require_csrf)])
